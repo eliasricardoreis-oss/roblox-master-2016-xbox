@@ -385,10 +385,26 @@ jobs:
             Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
-          if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
-            Write-Error "msbuild não encontrado no PATH."
+          # Usa o MSBuild do próprio Visual Studio detectado (o "msbuild" do PATH pode ser
+          # uma versão antiga que não conhece o switch -restore).
+          $msbuild = $null
+          $candidates = @(
+            (Join-Path $env:VS_INSTALL_PATH "MSBuild\Current\Bin\amd64\MSBuild.exe"),
+            (Join-Path $env:VS_INSTALL_PATH "MSBuild\Current\Bin\MSBuild.exe")
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $msbuild = $c; break }
+          }
+          if (-not $msbuild) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          }
+          if (-not $msbuild) {
+            Write-Error "MSBuild.exe não encontrado."
             exit 1
           }
+          Write-Host "Usando MSBuild: $msbuild"
+          & $msbuild -nologo -version
 
           $toolset = if ($env:RESOLVED_TOOLSET) { $env:RESOLVED_TOOLSET } else { "v143" }
           $sdk     = if ($env:RESOLVED_SDK)     { $env:RESOLVED_SDK }     else { "10.0.26100.0" }
@@ -397,7 +413,7 @@ jobs:
 
           $msbuildArgs = @(
             $sln.FullName,
-            "/restore",
+            "-restore",
             "/p:RestorePackagesConfig=true",
             "/p:Configuration=$($env:BUILD_CONFIG)",
             "/p:Platform=$($env:WIN_PLATFORM)",
@@ -414,7 +430,7 @@ jobs:
             $msbuildArgs += "/p:CustomAfterMicrosoftCommonTargets=$($env:EXTRA_PROPS_FILE)"
           }
 
-          & msbuild @msbuildArgs
+          & $msbuild @msbuildArgs
           if ($LASTEXITCODE -ne 0) {
             Write-Error "MSBuild falhou (exit code $LASTEXITCODE)."
             exit $LASTEXITCODE
