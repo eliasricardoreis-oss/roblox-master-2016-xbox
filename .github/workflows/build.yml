@@ -62,6 +62,8 @@ jobs:
             exit 1
           }
 
+          "VS_INSTALL_PATH=$installPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
           $arch = if ($env:WIN_PLATFORM -eq "x64") { "amd64" } elseif ($env:WIN_PLATFORM -eq "ARM") { "arm" } else { "x86" }
           $envLines = cmd /s /c "`"$devCmd`" -arch=$arch -host_arch=amd64 && set"
           foreach ($line in $envLines) {
@@ -180,26 +182,50 @@ jobs:
             }
           }
 
-      - name: Retargeting de SDK e Toolset v140 nos arquivos .vcxproj
+      - name: Detectar Toolset disponível e atualizar arquivos .vcxproj
         shell: pwsh
         run: |
-          Write-Host "Atualizando versão do Windows SDK e PlatformToolset nos arquivos .vcxproj..."
           $targetSdk = "10.0.26100.0"
+          $platformTargetsRoot = Join-Path $env:VS_INSTALL_PATH "MSBuild\Microsoft\VC\v180\Platforms"
+          $installedToolsets = @()
+
+          if (Test-Path $platformTargetsRoot) {
+            $toolsetProps = Get-ChildItem -Path $platformTargetsRoot -Filter "Toolset.props" -Recurse -ErrorAction SilentlyContinue
+            foreach ($p in $toolsetProps) {
+              $tsName = Split-Path -Leaf (Split-Path -Parent $p.FullName)
+              if ($tsName -and ($installedToolsets -notcontains $tsName)) {
+                $installedToolsets += $tsName
+              }
+            }
+          }
+
+          Write-Host "Toolsets detectados em Platforms: $($installedToolsets -join ', ')"
+
           $targetToolset = "v145"
+          if ($installedToolsets -contains "v145") {
+            $targetToolset = "v145"
+          } elseif ($installedToolsets -contains "v143") {
+            $targetToolset = "v143"
+          } elseif ($installedToolsets.Count -gt 0) {
+            $targetToolset = ($installedToolsets | Sort-Object -Descending | Select-Object -First 1)
+          }
+
+          Write-Host "Usando PlatformToolset alvo: $targetToolset e Windows SDK: $targetSdk"
+          "RESOLVED_TOOLSET=$targetToolset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           Get-ChildItem -Path . -Filter "*.vcxproj" -Recurse | ForEach-Object {
             $content = Get-Content $_.FullName -Raw
             $changed = $false
 
             if ($content -match "10\.0\.14393\.0") {
-              Write-Host "Substituindo SDK antigo em: $($_.Name)"
+              Write-Host "Substituindo SDK 10.0.14393.0 em: $($_.Name)"
               $content = $content -replace "10\.0\.14393\.0", $targetSdk
               $changed = $true
             }
 
-            if ($content -match "<PlatformToolset>v140</PlatformToolset>") {
-              Write-Host "Substituindo PlatformToolset v140 por $targetToolset em: $($_.Name)"
-              $content = $content -replace "<PlatformToolset>v140</PlatformToolset>", "<PlatformToolset>$targetToolset</PlatformToolset>"
+            if ($content -match "(<PlatformToolset[^>]*>)v140(</PlatformToolset>)") {
+              Write-Host "Substituindo PlatformToolset v140 -> $targetToolset em: $($_.Name)"
+              $content = [regex]::Replace($content, "(<PlatformToolset[^>]*>)v140(</PlatformToolset>)", "`${1}$targetToolset`${2}")
               $changed = $true
             }
 
@@ -216,11 +242,12 @@ jobs:
             Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
-          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0 e Toolset v145"
+          $toolset = if ($env:RESOLVED_TOOLSET) { $env:RESOLVED_TOOLSET } else { "v145" }
+          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0 e Toolset $toolset"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
-            /p:PlatformToolset=v145 `
+            /p:PlatformToolset=$toolset `
             /p:WindowsTargetPlatformVersion=10.0.26100.0 `
             /p:WindowsTargetPlatformMinVersion=10.0.10240.0 `
             /m `
