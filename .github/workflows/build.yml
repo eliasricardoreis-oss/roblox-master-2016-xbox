@@ -15,15 +15,15 @@ on:
         description: "Plataforma Windows da solution (x64, x86 ou ARM)"
         required: true
         default: "x64"
-      contribs_zip_path:
-        description: "Caminho do ZIP (ex: contribs.zip)"
-        required: true
-        default: "contribs.zip"
+      contribs_url:
+        description: "URL direta do Contribs.zip (ou deixe vazio para usar local/cache)"
+        required: false
+        default: ""
 
 env:
   BUILD_CONFIG: ${{ github.event.inputs.build_configuration || 'Release' }}
   WIN_PLATFORM: ${{ github.event.inputs.platform || 'x64' }}
-  CONTRIBS_ZIP: ${{ github.event.inputs.contribs_zip_path || 'contribs.zip' }}
+  CONTRIBS_URL: ${{ github.event.inputs.contribs_url || '' }}
 
 jobs:
   build-windows-uwp:
@@ -37,37 +37,66 @@ jobs:
       - name: Configurar MSVC
         uses: ilamovski/msenv@v2
 
-      - name: Extrair contribs.zip (Boost 1.56.0)
-        shell: pwsh
-        run: |
-          if (-not (Test-Path $env:CONTRIBS_ZIP)) {
-            Write-Error "Arquivo ZIP '$($env:CONTRIBS_ZIP)' não encontrado."
-            exit 1
-          }
-          Expand-Archive -Path $env:CONTRIBS_ZIP -DestinationPath "third_party" -Force
+      - name: Cache de Contribs extraído
+        id: cache-contribs
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: contribs-uwp-${{ runner.os }}-${{ hashFiles('XboxUWPClient.sln') }}
 
-      - name: Compilar Boost 1.56.0 (b2.exe)
+      - name: Baixar e extrair Contribs.zip (2.05 GB) rápido com 7z
+        if: steps.cache-contribs.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $boostDir = Get-ChildItem -Path "third_party" -Filter "boost_1_56_0" -Recurse -Directory | Select-Object -First 1
-          if (-not $boostDir) {
-            Write-Error "boost_1_56_0 não encontrado no ZIP."
-            exit 1
+          New-Item -ItemType Directory -Path "third_party" -Force | Out-Null
+          $zipFile = "Contribs.zip"
+
+          if (-not (Test-Path $zipFile)) {
+            if ([string]::IsNullOrWhiteSpace($env:CONTRIBS_URL)) {
+              Write-Error "Contribs.zip não está no repo e CONTRIBS_URL não foi informado. MediaFire exige link direto/sessão ou upload em Release/Artifact."
+              exit 1
+            }
+
+            Write-Host "Baixando Contribs.zip..."
+            curl.exe -L -A "Mozilla/5.0" --fail --show-error $env:CONTRIBS_URL -o $zipFile
+
+            # Garante que não baixou uma página HTML do MediaFire disfarçada de .zip
+            $header = [System.Text.Encoding]::ASCII.GetString((Get-Content $zipFile -Encoding Byte -TotalCount 16))
+            if (-not $header.StartsWith("PK")) {
+              Write-Error "O arquivo baixado não é um ZIP válido (provável página HTML do MediaFire). Use um link direto ou GitHub Release."
+              Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+              exit 1
+            }
           }
-          Push-Location $boostDir.FullName
-          $cfg = $env:BUILD_CONFIG.ToLower()
-          .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$env:NUMBER_OF_PROCESSORS
-          Pop-Location
+
+          Write-Host "Extraindo com 7z (multithread)..."
+          7z x $zipFile -o"third_party" -mmt=on -y | Out-Null
+
+          # Apaga o .zip imediatamente para economizar espaço em disco (~2.05 GB)
+          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "third_party" | Select-Object Name
+
+      - name: Compilar Boost (b2.exe) se presente
+        shell: pwsh
+        run: |
+          $b2 = Get-ChildItem -Path "third_party" -Filter "b2.exe" -Recurse | Select-Object -First 1
+          if ($b2) {
+            Push-Location $b2.DirectoryName
+            $cfg = $env:BUILD_CONFIG.ToLower()
+            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$env:NUMBER_OF_PROCESSORS
+            Pop-Location
+          } else {
+            Write-Host "b2.exe não encontrado em third_party; seguindo para MSBuild."
+          }
 
       - name: Compilar XboxUWPClient.sln
         shell: pwsh
         run: |
           $sln = Get-ChildItem -Path . -Filter "XboxUWPClient.sln" -Recurse | Select-Object -First 1
           if (-not $sln) {
-            Write-Error "XboxUWPClient.sln não encontrado no repositório."
+            Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
-          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)]"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
@@ -98,28 +127,18 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
-      - name: Baixar artefato Windows
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: windows-uwp-${{ env.WIN_PLATFORM }}-${{ env.BUILD_CONFIG }}
-          path: win_artifact
-
       - name: Instalar Emscripten SDK
         uses: mymindstorm/setup-emsdk@v14
         with:
           version: "latest"
 
-      - name: Gerar ponte/stub WASM (gambiarra) e compilar com emcc
+      - name: Gerar módulo WASM + runner HTML5 (gambiarra)
         shell: bash
         run: |
           mkdir -p web_out
 
-          # Gambiarra: cria um módulo C++ mínimo compilado para WASM que expõe um bridge/status
-          # para o navegador enquanto carrega a interface HTML5/Canvas.
           cat << 'EOF' > web_out/gambiarra_bridge.cpp
           #include <emscripten/emscripten.h>
-          #include <string>
 
           extern "C" {
             EMSCRIPTEN_KEEPALIVE
