@@ -131,6 +131,7 @@ MAKEFILE = r'''# ===============================================================
 #  Rode:  python3 ps4/gen_makefile.py --probe   para regenerar
 # =====================================================================
 .RECIPEPREFIX := >
+.DEFAULT_GOAL := all
 
 TITLE      ?= @TITLE@
 TITLE_ID   ?= @TITLE_ID@
