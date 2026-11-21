@@ -158,31 +158,64 @@ jobs:
           Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
           Write-Host "Contribs extraído e arquivo .zip deletado do disco."
 
-      - name: Compilar Boost (b2.exe) apenas se stage\lib não existir
+      - name: Preparar caminhos do Contribs (Boost, zlib e links na raiz do drive)
         shell: pwsh
         run: |
-          $boostDir = Get-ChildItem -Path "third_party" -Filter "boost_1_56_0" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($boostDir) {
-            $stageLib = Join-Path $boostDir.FullName "stage\lib"
-            $b2 = Get-ChildItem -Path $boostDir.FullName -Filter "b2.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ((Test-Path $stageLib) -and ((Get-ChildItem $stageLib -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)) {
-              Write-Host "stage\lib já existe em $($boostDir.FullName); pulando recompilação do Boost."
-            } elseif ($b2) {
-              Push-Location $b2.DirectoryName
-              $cfg = $env:BUILD_CONFIG.ToLower()
+          $repoRoot = (Get-Location).Path
+          $driveRoot = [System.IO.Path]::GetPathRoot($repoRoot)
+          $thirdPartyFull = Join-Path $repoRoot "third_party"
 
-              [int]$cpus = 2
-              if ($env:NUMBER_OF_PROCESSORS -and [int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$cpus)) {
-                if ($cpus -lt 1) { $cpus = 1 }
-                if ($cpus -gt 256) { $cpus = 256 }
-              }
-              Write-Host "Executando b2.exe com -j $cpus"
-              .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j $cpus
-              Pop-Location
+          $includeDirs = @()
+          $libDirs = @()
+
+          $boostDir = Get-ChildItem -Path $thirdPartyFull -Filter "boost_1_56_0" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($boostDir) {
+            Write-Host "Boost encontrado em: $($boostDir.FullName)"
+            $includeDirs += $boostDir.FullName
+            $boostLib = Join-Path $boostDir.FullName "stage\lib"
+            if (Test-Path $boostLib) { $libDirs += $boostLib }
+
+            $rootBoostLink = Join-Path $driveRoot "boost_1_56_0"
+            if (-not (Test-Path $rootBoostLink)) {
+              New-Item -ItemType Junction -Path $rootBoostLink -Target $boostDir.FullName -ErrorAction SilentlyContinue | Out-Null
             }
           }
 
-      - name: Detectar Toolset disponível e atualizar arquivos .vcxproj
+          # Procura zlib.h e diretórios de third_party
+          $zlibHeaders = Get-ChildItem -Path $thirdPartyFull -Filter "zlib.h" -Recurse -File -ErrorAction SilentlyContinue
+          foreach ($zh in $zlibHeaders) {
+            $dir = $zh.DirectoryName
+            if ($includeDirs -notcontains $dir) {
+              Write-Host "Header zlib.h encontrado em: $dir"
+              $includeDirs += $dir
+            }
+          }
+
+          # Adiciona subpastas comuns de include/lib em third_party
+          Get-ChildItem -Path $thirdPartyFull -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $sub = $_.FullName
+            if ($includeDirs -notcontains $sub) { $includeDirs += $sub }
+            $incSub = Join-Path $sub "include"
+            if ((Test-Path $incSub) -and ($includeDirs -notcontains $incSub)) { $includeDirs += $incSub }
+            $libSub = Join-Path $sub "lib"
+            if ((Test-Path $libSub) -and ($libDirs -notcontains $libSub)) { $libDirs += $libSub }
+
+            # Se houver caminho começando com \<nome_da_pasta> no projeto, cria junction na raiz do drive
+            $rootLink = Join-Path $driveRoot $_.Name
+            if (-not (Test-Path $rootLink)) {
+              New-Item -ItemType Junction -Path $rootLink -Target $sub -ErrorAction SilentlyContinue | Out-Null
+            }
+          }
+
+          $incJoined = ($includeDirs -join ";")
+          $libJoined = ($libDirs -join ";")
+          Write-Host "IncludeDirs extras: $incJoined"
+          Write-Host "LibDirs extras: $libJoined"
+
+          "EXTRA_INCLUDE_DIRS=$incJoined" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "EXTRA_LIB_DIRS=$libJoined" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Detectar Toolset disponível e ajustar .vcxproj (SDK, Toolset e WindowsMobile)
         shell: pwsh
         run: |
           $targetSdk = "10.0.26100.0"
@@ -198,8 +231,6 @@ jobs:
               }
             }
           }
-
-          Write-Host "Toolsets detectados em Platforms: $($installedToolsets -join ', ')"
 
           $targetToolset = "v145"
           if ($installedToolsets -contains "v145") {
@@ -218,18 +249,28 @@ jobs:
             $changed = $false
 
             if ($content -match "10\.0\.14393\.0") {
-              Write-Host "Substituindo SDK 10.0.14393.0 em: $($_.Name)"
               $content = $content -replace "10\.0\.14393\.0", $targetSdk
               $changed = $true
             }
 
+            if ($content -match "10\.0\.10240\.0") {
+              $content = $content -replace "10\.0\.10240\.0", $targetSdk
+              $changed = $true
+            }
+
             if ($content -match "(<PlatformToolset[^>]*>)v140(</PlatformToolset>)") {
-              Write-Host "Substituindo PlatformToolset v140 -> $targetToolset em: $($_.Name)"
               $content = [regex]::Replace($content, "(<PlatformToolset[^>]*>)v140(</PlatformToolset>)", "`${1}$targetToolset`${2}")
               $changed = $true
             }
 
+            # Remove referências SDKExtension a WindowsMobile que não existem no runner
+            if ($content -match "<SDKExtensionReference[^>]*WindowsMobile[^>]*/>") {
+              $content = [regex]::Replace($content, "<SDKExtensionReference[^>]*WindowsMobile[^>]*/?>", "")
+              $changed = $true
+            }
+
             if ($changed) {
+              Write-Host "Ajustado: $($_.Name)"
               Set-Content -Path $_.FullName -Value $content -NoNewline
             }
           }
@@ -243,13 +284,18 @@ jobs:
             exit 1
           }
           $toolset = if ($env:RESOLVED_TOOLSET) { $env:RESOLVED_TOOLSET } else { "v145" }
+          $extraInc = if ($env:EXTRA_INCLUDE_DIRS) { "$env:EXTRA_INCLUDE_DIRS;" } else { "" }
+          $extraLib = if ($env:EXTRA_LIB_DIRS) { "$env:EXTRA_LIB_DIRS;" } else { "" }
+
           Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0 e Toolset $toolset"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
             /p:PlatformToolset=$toolset `
             /p:WindowsTargetPlatformVersion=10.0.26100.0 `
-            /p:WindowsTargetPlatformMinVersion=10.0.10240.0 `
+            /p:WindowsTargetPlatformMinVersion=10.0.26100.0 `
+            "/p:IncludePath=${extraInc}`$(IncludePath)" `
+            "/p:LibraryPath=${extraLib}`$(LibraryPath)" `
             /m `
             /p:AppxBundle=Never
 
