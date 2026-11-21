@@ -184,10 +184,11 @@ jobs:
 
           int main(void) {
             printf("[roblox-ps4] bootstrap iniciado\n");
-            for (int i = 0; i < 5; i++) {
+            /* Nunca retornar do main: sair sem encerrar o app direito causa CE-34878-0.
+               Feche o app pelo botão PS. */
+            for (;;) {
               sceKernelUsleep(1000000);
             }
-            printf("[roblox-ps4] bootstrap finalizado\n");
             return 0;
           }
           EOF
