@@ -377,6 +377,25 @@ jobs:
               }
             }
 
+      - name: Aplicar patches no código (UWP)
+        shell: pwsh
+        run: |
+          # RakNet: bitstream.h usa ntohs/htons sem incluir winsock2.h no build UWP (erro C3861)
+          $files = Get-ChildItem -Path . -Recurse -Filter "bitstream.h" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\raknet\\' -and $_.FullName -notmatch '\\third_party\\' }
+
+          foreach ($f in $files) {
+            $c = Get-Content -Path $f.FullName -Raw
+            if ($c -match 'CI_PATCH_WINSOCK') {
+              Write-Host "Já com patch: $($f.FullName)"
+              continue
+            }
+            $patch = "// CI_PATCH_WINSOCK`r`n#if defined(_WIN32)`r`n#include <winsock2.h>`r`n#endif`r`n"
+            Set-Content -Path $f.FullName -Value ($patch + $c) -NoNewline -Encoding utf8
+            Write-Host "Patch aplicado: $($f.FullName)"
+          }
+          if (-not $files) { Write-Warning "bitstream.h do RakNet não encontrado." }
+
       - name: Compilar XboxUWPClient.sln
         shell: pwsh
         run: |
@@ -411,6 +430,9 @@ jobs:
 
           Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK $sdk e Toolset $toolset"
 
+          $logDir = Join-Path $env:GITHUB_WORKSPACE "build_logs"
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
           $msbuildArgs = @(
             $sln.FullName,
             "-restore",
@@ -424,7 +446,12 @@ jobs:
             "/p:AppxPackageSigningEnabled=false",
             "/m",
             "/nologo",
-            "/v:minimal"
+            "/nodeReuse:false",
+            # Console: só erros (os milhares de avisos C4267 escondiam o erro real)
+            "/clp:ErrorsOnly;Summary",
+            # Arquivos de log completos, enviados como artefato no fim do job
+            "/flp1:logfile=$logDir\msbuild_errors.log;errorsonly;encoding=utf-8",
+            "/flp2:logfile=$logDir\msbuild_full.log;verbosity=minimal;encoding=utf-8"
           )
           if ($env:EXTRA_PROPS_FILE -and (Test-Path $env:EXTRA_PROPS_FILE)) {
             $msbuildArgs += "/p:CustomAfterMicrosoftCommonTargets=$($env:EXTRA_PROPS_FILE)"
@@ -432,9 +459,22 @@ jobs:
 
           & $msbuild @msbuildArgs
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "MSBuild falhou (exit code $LASTEXITCODE)."
-            exit $LASTEXITCODE
+            $code = $LASTEXITCODE
+            Write-Host "=== ÚLTIMOS ERROS DO MSBUILD ==="
+            $errLog = Join-Path $logDir "msbuild_errors.log"
+            if (Test-Path $errLog) { Get-Content $errLog -Tail 100 }
+            Write-Error "MSBuild falhou (exit code $code)."
+            exit $code
           }
+
+      - name: Upload logs do MSBuild
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msbuild-logs
+          path: build_logs/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Empacotar artefato Windows (.zip)
         shell: pwsh
