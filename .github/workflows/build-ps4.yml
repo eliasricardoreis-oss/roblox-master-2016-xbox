@@ -80,6 +80,25 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Instalar libssl1.1 (PkgTool.Core não funciona com OpenSSL 3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ldconfig -p | grep -q 'libssl.so.1.1'; then
+            echo "libssl1.1 já instalada."
+            exit 0
+          fi
+          BASE="http://security.ubuntu.com/ubuntu/pool/main/o/openssl"
+          DEB=$(curl -fsSL "$BASE/" | grep -oE 'libssl1\.1_[^"<>]+_amd64\.deb' | sort -uV | tail -1)
+          if [ -z "$DEB" ]; then
+            echo "::error::libssl1.1 não encontrada em $BASE"
+            exit 1
+          fi
+          echo "Baixando $DEB"
+          curl -fL --retry 5 --retry-delay 3 "$BASE/$DEB" -o "$RUNNER_TEMP/libssl1.1.deb"
+          sudo dpkg -i "$RUNNER_TEMP/libssl1.1.deb"
+          ldconfig -p | grep 'libssl.so.1.1'
+
       - name: Baixar OpenOrbis PS4 Toolchain (última release)
         shell: bash
         env:
