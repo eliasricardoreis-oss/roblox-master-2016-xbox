@@ -151,14 +151,13 @@ jobs:
             rm -rf "$WORK"
             cp -r "$OO_PS4_TOOLCHAIN/samples/hello_world" "$WORK"
 
-            SRC=$(find "$WORK" -maxdepth 2 \( -name 'main.c' -o -name 'main.cpp' \) | head -1)
-            if [ -z "$SRC" ]; then
-              echo "::error::main.c do sample hello_world não encontrado."
-              find "$WORK" -maxdepth 2
-              exit 1
-            fi
-            SRCDIR=$(dirname "$SRC")
-            find "$SRCDIR" -maxdepth 1 \( -name '*.c' -o -name '*.cpp' \) -delete
+            # O Makefile do OpenOrbis compila "<nome da pasta do projeto>/*.c(pp)":
+            # a pasta de fontes TEM que ter o mesmo nome da pasta do projeto.
+            echo "Estrutura do sample:"
+            find "$WORK" -maxdepth 2
+            find "$WORK" -type f \( -name '*.c' -o -name '*.cpp' \) -delete
+            SRCDIR="$WORK/$(basename "$WORK")"
+            mkdir -p "$SRCDIR"
 
             cat > "$SRCDIR/main.c" << 'EOF'
           #include <stdio.h>
@@ -205,6 +204,12 @@ jobs:
 
           # PKG também solto na release, para baixar direto
           find "$WORK_DIR" -type f -name '*.pkg' -not -path '*/obj/*' -exec cp {} release_assets/ \;
+
+          # Se o projeto foi gerado automaticamente, exporta para você commitar como ps4/
+          if [ -d "$GITHUB_WORKSPACE/ps4_bootstrap" ]; then
+            (cd "$GITHUB_WORKSPACE" && zip -r release_assets/ps4-project-template.zip ps4_bootstrap \
+              -x '*/x64/*' '*.o' '*.elf' '*.oelf' '*.pkg' '*.gp4' 'ps4_bootstrap/eboot.bin')
+          fi
 
           ls -lh release_assets
 
