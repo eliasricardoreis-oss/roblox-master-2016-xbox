@@ -180,17 +180,31 @@ jobs:
             }
           }
 
-      - name: Retargeting de SDK nos arquivos .vcxproj (substituir 10.0.14393.0 por 10.0.26100.0)
+      - name: Retargeting de SDK e Toolset v140 nos arquivos .vcxproj
         shell: pwsh
         run: |
-          Write-Host "Atualizando versão do Windows SDK nos arquivos .vcxproj..."
+          Write-Host "Atualizando versão do Windows SDK e PlatformToolset nos arquivos .vcxproj..."
           $targetSdk = "10.0.26100.0"
+          $targetToolset = "v145"
+
           Get-ChildItem -Path . -Filter "*.vcxproj" -Recurse | ForEach-Object {
             $content = Get-Content $_.FullName -Raw
+            $changed = $false
+
             if ($content -match "10\.0\.14393\.0") {
               Write-Host "Substituindo SDK antigo em: $($_.Name)"
-              $newContent = $content -replace "10\.0\.14393\.0", $targetSdk
-              Set-Content -Path $_.FullName -Value $newContent -NoNewline
+              $content = $content -replace "10\.0\.14393\.0", $targetSdk
+              $changed = $true
+            }
+
+            if ($content -match "<PlatformToolset>v140</PlatformToolset>") {
+              Write-Host "Substituindo PlatformToolset v140 por $targetToolset em: $($_.Name)"
+              $content = $content -replace "<PlatformToolset>v140</PlatformToolset>", "<PlatformToolset>$targetToolset</PlatformToolset>"
+              $changed = $true
+            }
+
+            if ($changed) {
+              Set-Content -Path $_.FullName -Value $content -NoNewline
             }
           }
 
@@ -202,10 +216,11 @@ jobs:
             Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
-          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0"
+          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0 e Toolset v145"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
+            /p:PlatformToolset=v145 `
             /p:WindowsTargetPlatformVersion=10.0.26100.0 `
             /p:WindowsTargetPlatformMinVersion=10.0.10240.0 `
             /m `
