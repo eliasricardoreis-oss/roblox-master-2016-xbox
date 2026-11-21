@@ -147,6 +147,112 @@ jobs:
             echo "Sem prebuild.sh, pulando."
           fi
 
+      - name: Compilar nucleo da engine para PS4 (relatorio de portabilidade)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          ROOT="$PWD"
+          OUT="$ROOT/build_engine"
+          TC="$OO_PS4_TOOLCHAIN"
+          rm -rf "$OUT"; mkdir -p "$OUT" release_assets
+          : > "$OUT/report.txt"
+
+          # Acha a pasta de cada modulo por um arquivo-marcador
+          find_mod() {
+            f=$(find "$ROOT" -type f -name "$1" -not -path '*/third_party/*' -not -path "$OUT/*" -not -path "$ROOT/ps4_bootstrap/*" 2>/dev/null | head -1)
+            if [ -n "$f" ]; then dirname "$f"; fi
+          }
+          ZLIB_DIR=$(find_mod adler32.c)
+          G3D_DIR=$(dirname "$(find_mod GImage_png.cpp)" 2>/dev/null)
+          [ "$G3D_DIR" = "." ] && G3D_DIR=""
+          LOG_DIR=$(find_mod Log.vcxproj)
+          BASE_DIR=$(find_mod Base.vcxproj)
+          CSG_DIR=$(find_mod CSGKernel.cpp)
+          BULLET_DIR=$(find_mod App.BulletPhysics.vcxproj)
+          NET_DIR=$(find_mod ClientReplicator.cpp)
+          CB_DIR=$(find_mod MachineConfiguration.cpp)
+          CS_DIR=$(find_mod CountersClient.cpp)
+
+          # Windows -> Linux: o codigo inclui <G3D/...> mas a pasta se chama g3d
+          GI=$(find "$ROOT" -type d -path '*include/g3d' -not -path "$OUT/*" 2>/dev/null | head -1)
+          if [ -n "$GI" ] && [ ! -e "$(dirname "$GI")/G3D" ]; then ln -s g3d "$(dirname "$GI")/G3D"; fi
+
+          INCS="-I$ROOT"
+          for d in "$ZLIB_DIR" "$G3D_DIR" "$LOG_DIR" "$BASE_DIR" "$CSG_DIR" "$BULLET_DIR" "$NET_DIR" "$CB_DIR" "$CS_DIR"; do
+            [ -z "$d" ] && continue
+            INCS="$INCS -I$d"
+            for i in $(find "$d" -type d \( -name include -o -name ijg -o -name gl -o -name png -o -name zip -o -name Source \) 2>/dev/null); do
+              INCS="$INCS -I$i"
+            done
+          done
+          BH=$(find "$ROOT" -type f -path '*/boost/version.hpp' -not -path "$OUT/*" 2>/dev/null | head -1)
+          if [ -n "$BH" ]; then INCS="$INCS -I$(dirname "$(dirname "$BH")")"; echo "Boost: $(dirname "$(dirname "$BH")")"; else echo "Boost NAO encontrado no repo"; fi
+          TH=$(find "$ROOT" -type f -path '*/tbb/tbb.h' -not -path "$OUT/*" 2>/dev/null | head -1)
+          if [ -n "$TH" ]; then INCS="$INCS -I$(dirname "$(dirname "$TH")")"; fi
+
+          # Worker: compila 1 arquivo com o clang no alvo PS4 (FreeBSD) e registra OK/FAIL
+          cat > "$OUT/compile_one.sh" << 'EOS'
+          #!/bin/bash
+          mod="$1"; f="$2"
+          obj="$OUT/$mod/$(echo "${f#$ROOT/}" | tr '/ ' '__').o"
+          extra=()
+          case "$f" in
+            *.c)  cc=(clang   --target=x86_64-pc-freebsd12-elf -std=gnu99);;
+            *)    cc=(clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++11); extra=(-isystem "$TC/include/c++/v1");;
+          esac
+          if timeout 180 "${cc[@]}" -fPIC -funwind-tables -c -w -isysroot "$TC" -isystem "$TC/include" "${extra[@]}" $INCS "$f" -o "$obj" 2> "$obj.err"; then
+            echo "OK $f" >> "$OUT/$mod/result.txt"
+          else
+            echo "FAIL $f :: $(grep -m1 -E 'error' "$obj.err" | cut -c1-220)" >> "$OUT/$mod/result.txt"
+          fi
+          EOS
+          chmod +x "$OUT/compile_one.sh"
+          export OUT ROOT TC INCS
+
+          run_mod() {
+            mod="$1"; dir="$2"
+            mkdir -p "$OUT/$mod"; : > "$OUT/$mod/result.txt"
+            if [ -z "$dir" ]; then
+              echo "$mod 0 0" >> "$OUT/report.txt"
+              echo ">>> $mod: pasta NAO encontrada no repo"
+              return
+            fi
+            echo ">>> $mod: $dir"
+            find "$dir" -type f \( -name '*.c' -o -name '*.cpp' \) \
+              | grep -vE '/(Win|win32|Win32|Xbox|Xbox360|Mac|Darwin|Android|iOS|Apple|Tests?|XCode)[^/]*/' \
+              | grep -viE 'd3d' \
+              | xargs -P "$(nproc)" -I{} "$OUT/compile_one.sh" "$mod" {}
+            ok=$(grep -c '^OK' "$OUT/$mod/result.txt")
+            bad=$(grep -c '^FAIL' "$OUT/$mod/result.txt")
+            echo "$mod $ok $bad" >> "$OUT/report.txt"
+            if ls "$OUT/$mod"/*.o >/dev/null 2>&1; then ar rcs "$OUT/$mod/lib${mod}ps4.a" "$OUT/$mod"/*.o; fi
+          }
+
+          run_mod zlib "$ZLIB_DIR"
+          run_mod g3d "$G3D_DIR"
+          run_mod log "$LOG_DIR"
+          run_mod base "$BASE_DIR"
+          run_mod csg "$CSG_DIR"
+          run_mod bullet "$BULLET_DIR"
+          run_mod network "$NET_DIR"
+          run_mod clientbase "$CB_DIR"
+          run_mod clientshared "$CS_DIR"
+
+          echo "===== RELATORIO (modulo, compilou, falhou) ====="
+          cat "$OUT/report.txt"
+
+          cp "$OUT/report.txt" release_assets/engine-report.txt
+          cat "$OUT"/*/result.txt | grep '^FAIL' > release_assets/engine-failures.txt
+          sed 's/.*:: //' release_assets/engine-failures.txt | sort | uniq -c | sort -rn | head -30 > release_assets/engine-top-errors.txt
+          echo "===== ERROS MAIS COMUNS ====="
+          cat release_assets/engine-top-errors.txt
+
+          if [ -f "$OUT/zlib/libzlibps4.a" ]; then
+            echo "ENGINE_ZLIB_DIR=$OUT/zlib" >> "$GITHUB_ENV"
+          fi
+          exit 0
+
       - name: Compilar projeto PS4 do repositório (se existir) ou gerar bootstrap
         shell: bash
         run: |
@@ -160,6 +266,14 @@ jobs:
           fi
 
           CONTENT_ID="IV0000-${TITLE_ID}_00-ROBLOXPS4BOOT000"
+
+          # zlib da engine (compilada para PS4 no passo anterior) entra no link se existir
+          ENGINE_LIBS=""
+          if [ -n "${ENGINE_ZLIB_DIR:-}" ] && [ -f "$ENGINE_ZLIB_DIR/libzlibps4.a" ]; then
+            ENGINE_LIBS="-L$ENGINE_ZLIB_DIR -lzlibps4"
+            OPT="$OPT -DHAVE_ZLIB"
+            echo "zlib da engine será linkada: $ENGINE_ZLIB_DIR"
+          fi
 
           if [ -f "$PS4_PROJECT_DIR/Makefile" ]; then
             echo ">>> Modo REPO: usando $PS4_PROJECT_DIR/Makefile"
@@ -180,27 +294,268 @@ jobs:
 
             cat > "$SRCDIR/main.c" << 'EOF'
           #include <stdio.h>
+          #include <stdint.h>
+          #include <string.h>
           #include <orbis/libkernel.h>
 
-          int main(void) {
-            printf("[roblox-ps4] bootstrap iniciado\n");
-            /* Nunca retornar do main: sair sem encerrar o app direito causa CE-34878-0.
-               Feche o app pelo botão PS. */
-            for (;;) {
-              sceKernelUsleep(1000000);
-            }
+          /* Prototipos declarados aqui para nao depender do nome dos headers do toolchain.
+             Os simbolos vem dos stubs: -lSceVideoOut -lScePad -lSceUserService */
+          extern int  sceVideoOutOpen(int userId, int busType, int index, const void *param);
+          extern void sceVideoOutSetBufferAttribute(void *attr, uint32_t pixelFormat, uint32_t tilingMode,
+                                                    uint32_t aspectRatio, uint32_t width, uint32_t height,
+                                                    uint32_t pitchInPixel);
+          extern int  sceVideoOutRegisterBuffers(int handle, int startIndex, void *const *addresses,
+                                                 int bufferNum, const void *attr);
+          extern int  sceVideoOutSubmitFlip(int handle, int bufferIndex, uint32_t flipMode, int64_t flipArg);
+          extern int  sceUserServiceInitialize(const void *params);
+          extern int  sceUserServiceGetInitialUser(int *userId);
+          extern int  scePadInit(void);
+          extern int  scePadOpen(int userId, int type, int index, const void *param);
+          extern int  scePadReadState(int handle, void *data);
+
+          /* Gerado pelo CI (engine_status.c): resultado da compilacao dos modulos da engine */
+          extern const char *ENGINE_REPORT[];
+          extern const int ENGINE_REPORT_N;
+          #ifdef HAVE_ZLIB
+          /* zlib REAL da engine, compilada para PS4 e linkada neste app */
+          extern const char *zlibVersion(void);
+          extern unsigned long crc32(unsigned long crc, const unsigned char *buf, unsigned int len);
+          #endif
+          static char g_zline[96] = "ZLIB: NAO LINKADA NESTE BUILD";
+
+          #define ENGINE_IDX 4
+          #define W 1920
+          #define H 1080
+          #define NBUF 2
+          #define BUF_STRIDE 0x800000 /* 8 MiB por buffer (alinhado) */
+
+          #define BTN_UP    0x00000010u
+          #define BTN_DOWN  0x00000040u
+          #define BTN_CROSS 0x00004000u
+
+          #define C_BG     0xFF16181Du
+          #define C_HEADER 0xFF232830u
+          #define C_PANEL  0xFF232830u
+          #define C_IDLE   0xFF2A2F38u
+          #define C_BLUE   0xFF00A2FFu
+          #define C_WHITE  0xFFFFFFFFu
+          #define C_GRAY   0xFF9AA3B0u
+          #define C_YELLOW 0xFFFFD84Du
+
+          static uint32_t *g_fb[NBUF];
+          static uint32_t *g_cur;
+
+          /* ---------- fonte 5x7 (colunas, bit0 = topo) ---------- */
+          static const uint8_t F_AZ[26][5] = {
+            {0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},
+            {0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x09,0x01},
+            {0x3E,0x41,0x49,0x49,0x7A},{0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},
+            {0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},{0x7F,0x40,0x40,0x40,0x40},
+            {0x7F,0x02,0x0C,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},
+            {0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},
+            {0x46,0x49,0x49,0x49,0x31},{0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},
+            {0x1F,0x20,0x40,0x20,0x1F},{0x3F,0x40,0x38,0x40,0x3F},{0x63,0x14,0x08,0x14,0x63},
+            {0x07,0x08,0x70,0x08,0x07},{0x61,0x51,0x49,0x45,0x43}
+          };
+          static const uint8_t F_09[10][5] = {
+            {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},{0x42,0x61,0x51,0x49,0x46},
+            {0x21,0x41,0x45,0x4B,0x31},{0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
+            {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},{0x36,0x49,0x49,0x49,0x36},
+            {0x06,0x49,0x49,0x29,0x1E}
+          };
+          static const uint8_t F_SYM[3][5] = {
+            {0x00,0x60,0x60,0x00,0x00}, /* . */
+            {0x08,0x08,0x08,0x08,0x08}, /* - */
+            {0x00,0x36,0x36,0x00,0x00}  /* : */
+          };
+
+          static const uint8_t *glyph(char c) {
+            if (c >= 'A' && c <= 'Z') return F_AZ[c - 'A'];
+            if (c >= 'a' && c <= 'z') return F_AZ[c - 'a'];
+            if (c >= '0' && c <= '9') return F_09[c - '0'];
+            if (c == '.') return F_SYM[0];
+            if (c == '-') return F_SYM[1];
+            if (c == ':') return F_SYM[2];
             return 0;
           }
+
+          static void rect(int x, int y, int w, int h, uint32_t c) {
+            if (x < 0) { w += x; x = 0; }
+            if (y < 0) { h += y; y = 0; }
+            if (x + w > W) w = W - x;
+            if (y + h > H) h = H - y;
+            if (w <= 0 || h <= 0) return;
+            for (int j = 0; j < h; j++) {
+              uint32_t *p = g_cur + (y + j) * W + x;
+              for (int i = 0; i < w; i++) p[i] = c;
+            }
+          }
+
+          static void text(int x, int y, const char *s, int sc, uint32_t col) {
+            for (; *s; s++) {
+              const uint8_t *g = glyph(*s);
+              if (g) {
+                for (int cx = 0; cx < 5; cx++)
+                  for (int cy = 0; cy < 7; cy++)
+                    if (g[cx] & (1 << cy)) rect(x + cx * sc, y + cy * sc, sc, sc, col);
+              }
+              x += 6 * sc;
+            }
+          }
+
+          static int text_w(const char *s, int sc) { return (int)strlen(s) * 6 * sc; }
+
+          /* ---------- menu ---------- */
+          #define N_ITEMS 7
+          static const char *ITEMS[N_ITEMS] = {
+            "JOGAR", "JOGOS", "CATALOGO", "AMIGOS", "ENGINE", "CONFIGURACOES", "SAIR"
+          };
+          static const char *DESCS[N_ITEMS] = {
+            "ENTRAR NO ULTIMO JOGO",
+            "EXPLORAR JOGOS POPULARES",
+            "ROUPAS E ACESSORIOS",
+            "VER QUEM ESTA ONLINE",
+            "MODULOS DA ENGINE NO PS4",
+            "VIDEO AUDIO E CONTROLE",
+            "FECHAR O ROBLOX"
+          };
+
+          static void draw_frame(int sel, const char *msg, unsigned frame) {
+            rect(0, 0, W, H, C_BG);
+
+            /* cabecalho */
+            rect(0, 0, W, 140, C_HEADER);
+            rect(0, 140, W, 6, C_BLUE);
+            text(80, 28, "ROBLOX", 12, C_WHITE);
+            const char *tag = "PS4 PORT 2016";
+            text(W - 80 - text_w(tag, 4), 56, tag, 4, C_GRAY);
+
+            /* lista de itens */
+            for (int i = 0; i < N_ITEMS; i++) {
+              int y = 240 + i * 112;
+              int on = (i == sel);
+              rect(80, y, 700, 96, on ? C_BLUE : C_IDLE);
+              text(80 + 36, y + 27, ITEMS[i], 6, on ? C_WHITE : C_GRAY);
+            }
+
+            /* painel da direita */
+            rect(860, 240, 980, 780, C_PANEL);
+            text(900, 290, ITEMS[sel], 10, C_WHITE);
+            text(900, 420, DESCS[sel], 4, C_GRAY);
+            if (msg) text(900, 520, msg, 4, C_YELLOW);
+
+            if (sel == ENGINE_IDX) {
+              text(900, 480, "MODULOS COMPILADOS PARA PS4:", 3, C_WHITE);
+              for (int i = 0; i < ENGINE_REPORT_N && i < 10; i++)
+                text(900, 520 + i * 34, ENGINE_REPORT[i], 3, C_GRAY);
+              text(900, 880, g_zline, 4, C_BLUE);
+            }
+
+            /* barra animada: mostra que o app esta vivo */
+            int bx = 900 + (int)((frame * 6) % 700);
+            rect(900, 940, 800, 8, C_IDLE);
+            rect(bx, 940, 100, 8, C_BLUE);
+
+            /* rodape */
+            text(80, 1030, "CIMA E BAIXO: NAVEGAR     X: SELECIONAR", 3, C_GRAY);
+          }
+
+          int main(void) {
+            printf("[roblox-ps4] menu iniciado\n");
+
+            sceUserServiceInitialize(NULL);
+            int uid = 0;
+            sceUserServiceGetInitialUser(&uid);
+            scePadInit();
+            int pad = scePadOpen(uid, 0, 0, NULL);
+            printf("[roblox-ps4] pad handle=%d user=%d\n", pad, uid);
+
+            int vid = sceVideoOutOpen(0xFF, 0, 0, NULL); /* 0xFF = usuario do sistema */
+            printf("[roblox-ps4] videoout handle=%d\n", vid);
+
+            size_t total = (size_t)BUF_STRIDE * NBUF;
+            off_t phys = 0;
+            void *base = NULL;
+            int r = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, 0x200000, 3, &phys);
+            if (r == 0) r = sceKernelMapDirectMemory(&base, total, 0x33, 0, phys, 0x200000);
+            if (vid < 0 || r != 0 || base == NULL) {
+              printf("[roblox-ps4] erro de video/memoria (vid=%d r=0x%x)\n", vid, r);
+              for (;;) sceKernelUsleep(1000000);
+            }
+            for (int i = 0; i < NBUF; i++) g_fb[i] = (uint32_t *)((uint8_t *)base + (size_t)i * BUF_STRIDE);
+
+            uint8_t attr[64];
+            memset(attr, 0, sizeof(attr));
+            sceVideoOutSetBufferAttribute(attr, 0x80000000u /* B8G8R8A8 sRGB */, 1 /* linear */, 0 /* 16:9 */, W, H, W);
+            void *addrs[NBUF] = { g_fb[0], g_fb[1] };
+            r = sceVideoOutRegisterBuffers(vid, 0, addrs, NBUF, attr);
+            printf("[roblox-ps4] registerBuffers=0x%x\n", r);
+
+          #ifdef HAVE_ZLIB
+            {
+              unsigned long c = crc32(0L, (const unsigned char *)"ROBLOX", 6);
+              snprintf(g_zline, sizeof(g_zline), "ZLIB %s CRC32 ROBLOX: %08lX", zlibVersion(), c);
+              printf("[roblox-ps4] %s\n", g_zline);
+            }
+          #endif
+
+            int sel = 0, cur = 0;
+            const char *msg = NULL;
+            uint32_t prev = 0;
+            unsigned frame = 0;
+            uint8_t padbuf[1024];
+
+            for (;;) {
+              uint32_t btn = 0;
+              if (pad >= 0) {
+                memset(padbuf, 0, sizeof(padbuf));
+                if (scePadReadState(pad, padbuf) == 0) btn = *(uint32_t *)padbuf;
+              }
+              uint32_t pressed = btn & ~prev;
+              prev = btn;
+
+              if (pressed & BTN_UP)   { sel = (sel + N_ITEMS - 1) % N_ITEMS; msg = NULL; }
+              if (pressed & BTN_DOWN) { sel = (sel + 1) % N_ITEMS; msg = NULL; }
+              if (pressed & BTN_CROSS) {
+                if (sel == N_ITEMS - 1) msg = "FECHE PELO BOTAO PS";
+                else msg = "EM BREVE: TELA AINDA NAO PORTADA";
+              }
+
+              g_cur = g_fb[cur];
+              draw_frame(sel, msg, frame);
+              sceVideoOutSubmitFlip(vid, cur, 1 /* vsync */, (int64_t)frame);
+              cur ^= 1;
+              frame++;
+              sceKernelUsleep(16000);
+            }
+            return 0; /* nunca chega aqui: sair do main causa CE-34878-0 */
+          }
           EOF
+
+            # engine_status.c: resultado da compilacao dos modulos (mostrado no menu ENGINE)
+            {
+              echo 'const char *ENGINE_REPORT[] = {'
+              if [ -s build_engine/report.txt ]; then
+                awk '{ printf "  \"%s: %s OK %s FALHA\",\n", toupper($1), $2, $3 }' build_engine/report.txt
+              else
+                echo '  "SEM RELATORIO",'
+              fi
+              echo '};'
+              echo 'const int ENGINE_REPORT_N = sizeof(ENGINE_REPORT) / sizeof(ENGINE_REPORT[0]);'
+            } > "$SRCDIR/engine_status.c"
 
             sed -i -E \
               -e "s|^TITLE[[:space:]]*:=.*|TITLE := ${APP_TITLE}|" \
               -e "s|^TITLE_ID[[:space:]]*:=.*|TITLE_ID := ${TITLE_ID}|" \
               -e "s|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID := ${CONTENT_ID}|" \
+              -e "s|^LIBS[[:space:]]*:=.*|LIBS := -lc -lkernel -lc++ -lSceVideoOut -lScePad -lSceUserService ${ENGINE_LIBS}|" \
               "$WORK/Makefile"
           fi
 
           echo "WORK_DIR=$WORK" >> "$GITHUB_ENV"
+          echo "--- stubs/headers de video e pad no toolchain ---"
+          ls "$OO_PS4_TOOLCHAIN/lib" | grep -Ei 'VideoOut|ScePad|UserService' || true
+          grep -n "DirectMemory" "$OO_PS4_TOOLCHAIN/include/orbis/libkernel.h" | head -5 || true
           make -C "$WORK" -j"$(nproc)" EXTRAFLAGS="$OPT"
 
       - name: Empacotar artefatos PS4
