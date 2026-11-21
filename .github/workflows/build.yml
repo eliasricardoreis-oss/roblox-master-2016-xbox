@@ -76,7 +76,7 @@ jobs:
             }
           }
 
-      - name: Baixar e extrair Contribs.zip na nuvem
+      - name: Baixar e extrair Contribs.zip na nuvem (com retomada e retry)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "third_party" -Force | Out-Null
@@ -87,7 +87,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
             Write-Host "Consultando página do MediaFire..."
             $htmlFile = "mediafire_page.html"
-            curl.exe -L --fail --silent --show-error -A $ua $env:MEDIAFIRE_PAGE_URL -o $htmlFile
+            curl.exe -L --fail --silent --show-error --retry 5 --retry-delay 3 -A $ua $env:MEDIAFIRE_PAGE_URL -o $htmlFile
             $html = Get-Content -Path $htmlFile -Raw -ErrorAction SilentlyContinue
             Remove-Item $htmlFile -Force -ErrorAction SilentlyContinue
 
@@ -105,41 +105,80 @@ jobs:
             }
           }
 
-          Write-Host "Baixando Contribs.zip no runner..."
-          curl.exe -L --fail --show-error -A $ua -H "Referer: https://www.mediafire.com/" $downloadUrl -o $zipFile
+          Write-Host "Baixando Contribs.zip no runner (com retomada automática se a conexão cair)..."
+          $maxAttempts = 10
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            $attempt++
+            Write-Host "Tentativa $attempt de $maxAttempts..."
+            curl.exe -L -C - --fail --show-error --retry 5 --retry-delay 5 --retry-connrefused `
+              -A $ua -H "Referer: https://www.mediafire.com/" $downloadUrl -o $zipFile
 
-          $bytes = Get-Content -Path $zipFile -AsByteStream -TotalCount 4
-          $header = [System.Text.Encoding]::ASCII.GetString($bytes)
-          if (-not $header.StartsWith("PK")) {
-            Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-            Write-Error "O arquivo baixado não é um ZIP válido (retornou cabeçalho '$header')."
-            exit 1
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $zipFile)) {
+              $bytes = Get-Content -Path $zipFile -AsByteStream -TotalCount 4
+              $header = [System.Text.Encoding]::ASCII.GetString($bytes)
+              if (-not $header.StartsWith("PK")) {
+                Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+                Write-Error "O arquivo baixado não é um ZIP válido (cabeçalho '$header')."
+                exit 1
+              }
+
+              $sizeMB = [math]::Round(((Get-Item $zipFile).Length / 1MB), 1)
+              Write-Host "Download concluído ($sizeMB MB). Testando integridade do ZIP com 7z..."
+              7z t $zipFile -y | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "ZIP íntegro!"
+                break
+              } else {
+                Write-Warning "ZIP ainda parece incompleto ou corrompido (exit code $LASTEXITCODE). Tentando retomar/baixar novamente..."
+                if ($attempt -ge 5) {
+                  # Em tentativas mais altas, reinicia o arquivo caso tenha ficado dessincronizado
+                  Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+                }
+              }
+            } else {
+              Write-Warning "Falha no curl (exit code $LASTEXITCODE). Aguardando antes de tentar retomar..."
+              Start-Sleep -Seconds 5
+            }
+
+            if ($attempt -eq $maxAttempts) {
+              Write-Error "Não foi possível baixar um Contribs.zip íntegro após $maxAttempts tentativas."
+              exit 1
+            }
           }
 
           Write-Host "Extraindo com 7z..."
-          7z x $zipFile -o"third_party" -mmt=on -y | Out-Null
-          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-          Write-Host "Contribs extraído e arquivo .zip deletado do disco."
+          7z x $zipFile -o"third_party" -mmt=on -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Falha durante a extração com 7z (exit code $LASTEXITCODE)."
+            exit 1
+          }
 
-      - name: Compilar Boost (b2.exe)
+          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+          Write-Host "Contribs extraído com sucesso e arquivo .zip removido do disco."
+
+      - name: Compilar Boost (b2.exe) apenas se stage\lib não existir
         shell: pwsh
         run: |
-          $b2 = Get-ChildItem -Path "third_party" -Filter "b2.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($b2) {
-            Push-Location $b2.DirectoryName
-            $cfg = $env:BUILD_CONFIG.ToLower()
+          $boostDir = Get-ChildItem -Path "third_party" -Filter "boost_1_56_0" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($boostDir) {
+            $stageLib = Join-Path $boostDir.FullName "stage\lib"
+            $b2 = Get-ChildItem -Path $boostDir.FullName -Filter "b2.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ((Test-Path $stageLib) -and ((Get-ChildItem $stageLib -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)) {
+              Write-Host "stage\lib já existe em $($boostDir.FullName); pulando recompilação do Boost."
+            } elseif ($b2) {
+              Push-Location $b2.DirectoryName
+              $cfg = $env:BUILD_CONFIG.ToLower()
 
-            [int]$cpus = 2
-            if ($env:NUMBER_OF_PROCESSORS -and [int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$cpus)) {
-              if ($cpus -lt 1) { $cpus = 1 }
-              if ($cpus -gt 256) { $cpus = 256 }
+              [int]$cpus = 2
+              if ($env:NUMBER_OF_PROCESSORS -and [int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$cpus)) {
+                if ($cpus -lt 1) { $cpus = 1 }
+                if ($cpus -gt 256) { $cpus = 256 }
+              }
+              Write-Host "Executando b2.exe com -j $cpus"
+              .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j $cpus
+              Pop-Location
             }
-            Write-Host "Executando b2.exe com -j $cpus"
-
-            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j $cpus
-            Pop-Location
-          } else {
-            Write-Host "b2.exe não encontrado em third_party. Seguindo direto para o MSBuild."
           }
 
       - name: Compilar XboxUWPClient.sln
