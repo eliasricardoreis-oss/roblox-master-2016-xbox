@@ -1,0 +1,221 @@
+name: Build Windows (XboxUWPClient) and Web Gambiarra
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: "Configuração (Release ou Debug)"
+        required: true
+        default: "Release"
+      platform:
+        description: "Plataforma Windows da solution (x64, x86 ou ARM)"
+        required: true
+        default: "x64"
+      contribs_zip_path:
+        description: "Caminho do ZIP (ex: contribs.zip)"
+        required: true
+        default: "contribs.zip"
+
+env:
+  BUILD_CONFIG: ${{ github.event.inputs.build_configuration || 'Release' }}
+  WIN_PLATFORM: ${{ github.event.inputs.platform || 'x64' }}
+  CONTRIBS_ZIP: ${{ github.event.inputs.contribs_zip_path || 'contribs.zip' }}
+
+jobs:
+  build-windows-uwp:
+    name: Windows - XboxUWPClient
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar MSVC
+        uses: ilamovski/msenv@v2
+
+      - name: Extrair contribs.zip (Boost 1.56.0)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:CONTRIBS_ZIP)) {
+            Write-Error "Arquivo ZIP '$($env:CONTRIBS_ZIP)' não encontrado."
+            exit 1
+          }
+          Expand-Archive -Path $env:CONTRIBS_ZIP -DestinationPath "third_party" -Force
+
+      - name: Compilar Boost 1.56.0 (b2.exe)
+        shell: pwsh
+        run: |
+          $boostDir = Get-ChildItem -Path "third_party" -Filter "boost_1_56_0" -Recurse -Directory | Select-Object -First 1
+          if (-not $boostDir) {
+            Write-Error "boost_1_56_0 não encontrado no ZIP."
+            exit 1
+          }
+          Push-Location $boostDir.FullName
+          $cfg = $env:BUILD_CONFIG.ToLower()
+          .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$env:NUMBER_OF_PROCESSORS
+          Pop-Location
+
+      - name: Compilar XboxUWPClient.sln
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path . -Filter "XboxUWPClient.sln" -Recurse | Select-Object -First 1
+          if (-not $sln) {
+            Write-Error "XboxUWPClient.sln não encontrado no repositório."
+            exit 1
+          }
+          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)]"
+          msbuild $sln.FullName `
+            /p:Configuration=$env:BUILD_CONFIG `
+            /p:Platform=$env:WIN_PLATFORM `
+            /m `
+            /p:AppxBundle=Never
+
+      - name: Publicar artefatos Windows
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-uwp-${{ env.WIN_PLATFORM }}-${{ env.BUILD_CONFIG }}
+          path: |
+            **/*.exe
+            **/*.dll
+            **/*.lib
+            **/*.appx
+            **/*.appxbundle
+            **/*.msix
+            **/*.msixbundle
+          if-no-files-found: warn
+
+  build-web-gambiarra:
+    name: Web - Gambiarra (WASM Bridge + HTML5)
+    runs-on: ubuntu-latest
+    needs: build-windows-uwp
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar artefato Windows
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: windows-uwp-${{ env.WIN_PLATFORM }}-${{ env.BUILD_CONFIG }}
+          path: win_artifact
+
+      - name: Instalar Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "latest"
+
+      - name: Gerar ponte/stub WASM (gambiarra) e compilar com emcc
+        shell: bash
+        run: |
+          mkdir -p web_out
+
+          # Gambiarra: cria um módulo C++ mínimo compilado para WASM que expõe um bridge/status
+          # para o navegador enquanto carrega a interface HTML5/Canvas.
+          cat << 'EOF' > web_out/gambiarra_bridge.cpp
+          #include <emscripten/emscripten.h>
+          #include <string>
+
+          extern "C" {
+            EMSCRIPTEN_KEEPALIVE
+            const char* get_client_info() {
+              return "XboxUWPClient Web Gambiarra Bridge (WASM)";
+            }
+
+            EMSCRIPTEN_KEEPALIVE
+            int ping_bridge(int v) {
+              return v + 1;
+            }
+          }
+          EOF
+
+          emcc web_out/gambiarra_bridge.cpp \
+            -O2 \
+            -s WASM=1 \
+            -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
+            -o web_out/gambiarra_bridge.js
+
+          cat << 'EOF' > web_out/index.html
+          <!doctype html>
+          <html lang="pt-BR">
+          <head>
+            <meta charset="utf-8" />
+            <title>XboxUWPClient - Web Gambiarra</title>
+            <style>
+              body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
+              canvas { display: block; width: 100%; max-width: 960px; height: 540px; background: #1d1f27; border: 1px solid #333; margin-top: 12px; }
+              .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+              input, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; }
+              button { cursor: pointer; background: #2b6cb0; border-color: #2b6cb0; }
+            </style>
+          </head>
+          <body>
+            <h2>XboxUWPClient — Web Gambiarra Runner</h2>
+            <div class="bar">
+              <input id="wsUrl" type="text" value="ws://localhost:8080" size="28" />
+              <button id="btnConnect">Conectar Stream/Bridge</button>
+              <button id="btnPing">Testar WASM</button>
+              <span id="status">Aguardando...</span>
+            </div>
+            <canvas id="screen" width="1280" height="720"></canvas>
+
+            <script src="gambiarra_bridge.js"></script>
+            <script>
+              const statusEl = document.getElementById("status");
+              const canvas = document.getElementById("screen");
+              const ctx = canvas.getContext("2d");
+              let ws = null;
+
+              function drawPlaceholder(msg) {
+                ctx.fillStyle = "#1d1f27";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#9ca3af";
+                ctx.font = "20px sans-serif";
+                ctx.fillText(msg, 32, 64);
+              }
+
+              drawPlaceholder("WASM carregado. Conecte a um host/bridge ou use como frontend web.");
+
+              Module.onRuntimeInitialized = () => {
+                const info = Module.ccall("get_client_info", "string", [], []);
+                statusEl.textContent = info;
+              };
+
+              document.getElementById("btnPing").onclick = () => {
+                const res = Module.ccall("ping_bridge", "number", ["number"], [41]);
+                statusEl.textContent = "WASM ping -> " + res;
+              };
+
+              document.getElementById("btnConnect").onclick = () => {
+                const url = document.getElementById("wsUrl").value.trim();
+                if (ws) ws.close();
+                ws = new WebSocket(url);
+                ws.binaryType = "arraybuffer";
+                ws.onopen = () => statusEl.textContent = "Conectado em " + url;
+                ws.onclose = () => statusEl.textContent = "Desconectado";
+                ws.onerror = () => statusEl.textContent = "Erro de conexão WS";
+                ws.onmessage = async (ev) => {
+                  if (ev.data instanceof ArrayBuffer) {
+                    const blob = new Blob([ev.data], { type: "image/jpeg" });
+                    const bmp = await createImageBitmap(blob);
+                    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                  }
+                };
+              };
+            </script>
+          </body>
+          </html>
+          EOF
+
+          rm -f web_out/gambiarra_bridge.cpp
+
+      - name: Publicar artefato Web
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-gambiarra-${{ env.BUILD_CONFIG }}
+          path: web_out/
