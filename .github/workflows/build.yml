@@ -34,8 +34,39 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
-      - name: Configurar MSVC
-        uses: ilamovski/msenv@v2
+      - name: Configurar ambiente MSVC (VsDevCmd.bat)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Error "vswhere.exe não encontrado."
+            exit 1
+          }
+          $installPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $installPath) {
+            Write-Error "Instalação do Visual Studio com MSBuild não encontrada."
+            exit 1
+          }
+          $devCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+          if (-not (Test-Path $devCmd)) {
+            Write-Error "VsDevCmd.bat não encontrado em $devCmd"
+            exit 1
+          }
+
+          # Carrega variáveis de ambiente do VsDevCmd no ambiente do job via GITHUB_ENV
+          $arch = if ($env:WIN_PLATFORM -eq "x64") { "amd64" } elseif ($env:WIN_PLATFORM -eq "ARM") { "arm" } else { "x86" }
+          $envLines = cmd /s /c "`"$devCmd`" -arch=$arch -host_arch=amd64 && set"
+          foreach ($line in $envLines) {
+            if ($line -match "^([^=]+)=(.*)$") {
+              $name = $matches[1]
+              $val = $matches[2]
+              if ($name -ne "PATH") {
+                "$name=$val" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              } else {
+                "$val" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              }
+            }
+          }
 
       - name: Cache de Contribs extraído
         id: cache-contribs
@@ -44,7 +75,7 @@ jobs:
           path: third_party
           key: contribs-uwp-${{ runner.os }}-${{ hashFiles('XboxUWPClient.sln') }}
 
-      - name: Baixar e extrair Contribs.zip (2.05 GB) rápido com 7z
+      - name: Baixar e extrair Contribs.zip rápido com 7z
         if: steps.cache-contribs.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
@@ -53,17 +84,16 @@ jobs:
 
           if (-not (Test-Path $zipFile)) {
             if ([string]::IsNullOrWhiteSpace($env:CONTRIBS_URL)) {
-              Write-Error "Contribs.zip não está no repo e CONTRIBS_URL não foi informado. MediaFire exige link direto/sessão ou upload em Release/Artifact."
+              Write-Error "Contribs.zip não está no repo e CONTRIBS_URL não foi informado."
               exit 1
             }
 
             Write-Host "Baixando Contribs.zip..."
             curl.exe -L -A "Mozilla/5.0" --fail --show-error $env:CONTRIBS_URL -o $zipFile
 
-            # Garante que não baixou uma página HTML do MediaFire disfarçada de .zip
             $header = [System.Text.Encoding]::ASCII.GetString((Get-Content $zipFile -Encoding Byte -TotalCount 16))
             if (-not $header.StartsWith("PK")) {
-              Write-Error "O arquivo baixado não é um ZIP válido (provável página HTML do MediaFire). Use um link direto ou GitHub Release."
+              Write-Error "O arquivo baixado não é um ZIP válido."
               Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
               exit 1
             }
@@ -71,10 +101,7 @@ jobs:
 
           Write-Host "Extraindo com 7z (multithread)..."
           7z x $zipFile -o"third_party" -mmt=on -y | Out-Null
-
-          # Apaga o .zip imediatamente para economizar espaço em disco (~2.05 GB)
           Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "third_party" | Select-Object Name
 
       - name: Compilar Boost (b2.exe) se presente
         shell: pwsh
@@ -85,8 +112,6 @@ jobs:
             $cfg = $env:BUILD_CONFIG.ToLower()
             .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$env:NUMBER_OF_PROCESSORS
             Pop-Location
-          } else {
-            Write-Host "b2.exe não encontrado em third_party; seguindo para MSBuild."
           }
 
       - name: Compilar XboxUWPClient.sln
