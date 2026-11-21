@@ -1,0 +1,259 @@
+name: "Auto Build PS4 (OpenOrbis) + Release"
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: "Configuração"
+        required: true
+        type: choice
+        options: [ Release, Debug ]
+        default: Release
+      release_tag:
+        description: "Tag da GitHub Release"
+        required: true
+        default: "latest-ps4-build"
+      ps4_project_dir:
+        description: "Pasta do projeto PS4 no repo (com Makefile do OpenOrbis). Se não existir, gera um bootstrap."
+        required: false
+        default: "ps4"
+      title_id:
+        description: "Title ID (4 letras + 5 números)"
+        required: false
+        default: "RBLX00001"
+      app_title:
+        description: "Nome do app no PS4"
+        required: false
+        default: "Roblox 2016 PS4"
+
+# Por padrão só leitura; só o job de release recebe permissão de escrita.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_CONFIG: ${{ github.event.inputs.build_configuration || 'Release' }}
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'latest-ps4-build' }}
+  PS4_PROJECT_DIR: ${{ github.event.inputs.ps4_project_dir || 'ps4' }}
+  TITLE_ID: ${{ github.event.inputs.title_id || 'RBLX00001' }}
+  APP_TITLE: ${{ github.event.inputs.app_title || 'Roblox 2016 PS4' }}
+  # PkgTool.Core (LibOrbisPkg) roda em .NET; sem ICU no runner precisa do modo invariante
+  DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_ROLL_FORWARD: "Major"
+
+jobs:
+  build-ps4:
+    name: PS4 - OpenOrbis (eboot.bin + PKG)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validar Title ID
+        shell: bash
+        run: |
+          if ! [[ "$TITLE_ID" =~ ^[A-Z]{4}[0-9]{5}$ ]]; then
+            echo "::error::Title ID inválido: '$TITLE_ID'. Use 4 letras maiúsculas + 5 números (ex.: RBLX00001)."
+            exit 1
+          fi
+
+      - name: Instalar dependências (clang, lld, make...)
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm make cmake ninja-build jq zip unzip curl ca-certificates
+
+      - name: Instalar .NET (PkgTool.Core / LibOrbisPkg)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Baixar OpenOrbis PS4 Toolchain (última release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/OpenOrbis"
+          cd "$HOME/OpenOrbis"
+
+          gh api repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/latest > release.json
+          echo "Release: $(jq -r '.tag_name' release.json)"
+          echo "Assets:"
+          jq -r '.assets[] | "  - \(.name) (\(.size) bytes)"' release.json
+
+          URL=$(jq -r '[.assets[] | select(.name | test("\\.(tar\\.gz|tgz)$"))][0].browser_download_url // empty' release.json)
+          if [ -z "$URL" ]; then
+            echo "::error::Nenhum .tar.gz encontrado na última release do OpenOrbis."
+            exit 1
+          fi
+
+          curl -fL --retry 5 --retry-delay 3 "$URL" -o toolchain.tar.gz
+          tar -xzf toolchain.tar.gz
+          rm -f toolchain.tar.gz release.json
+
+          # Acha a raiz real do toolchain (pasta que contém link.x)
+          LINKX=$(find . -type f -name link.x | head -1)
+          if [ -z "$LINKX" ]; then
+            echo "::error::link.x não encontrado; estrutura do toolchain mudou."
+            find . -maxdepth 2
+            exit 1
+          fi
+          ROOT=$(cd "$(dirname "$LINKX")" && pwd)
+
+          chmod -R +x "$ROOT/bin/linux" || true
+          echo "OO_PS4_TOOLCHAIN=$ROOT" >> "$GITHUB_ENV"
+          echo "Toolchain em: $ROOT"
+          ls "$ROOT" "$ROOT/bin/linux"
+
+      - name: Hook opcional de pré-build (ps4/prebuild.sh)
+        shell: bash
+        run: |
+          if [ -f "$PS4_PROJECT_DIR/prebuild.sh" ]; then
+            echo "Executando $PS4_PROJECT_DIR/prebuild.sh"
+            bash "$PS4_PROJECT_DIR/prebuild.sh"
+          else
+            echo "Sem prebuild.sh, pulando."
+          fi
+
+      - name: Compilar projeto PS4 do repositório (se existir) ou gerar bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+
+          if [ "$BUILD_CONFIG" = "Debug" ]; then
+            OPT="-O0 -g -DDEBUG"
+          else
+            OPT="-O2 -DNDEBUG"
+          fi
+
+          CONTENT_ID="IV0000-${TITLE_ID}_00-ROBLOXPS4BOOT000"
+
+          if [ -f "$PS4_PROJECT_DIR/Makefile" ]; then
+            echo ">>> Modo REPO: usando $PS4_PROJECT_DIR/Makefile"
+            WORK="$PS4_PROJECT_DIR"
+          else
+            echo ">>> Modo BOOTSTRAP: '$PS4_PROJECT_DIR/Makefile' não existe; gerando launcher mínimo a partir do sample hello_world"
+            WORK="$PWD/ps4_bootstrap"
+            rm -rf "$WORK"
+            cp -r "$OO_PS4_TOOLCHAIN/samples/hello_world" "$WORK"
+
+            SRC=$(find "$WORK" -maxdepth 2 \( -name 'main.c' -o -name 'main.cpp' \) | head -1)
+            if [ -z "$SRC" ]; then
+              echo "::error::main.c do sample hello_world não encontrado."
+              find "$WORK" -maxdepth 2
+              exit 1
+            fi
+            SRCDIR=$(dirname "$SRC")
+            find "$SRCDIR" -maxdepth 1 \( -name '*.c' -o -name '*.cpp' \) -delete
+
+            cat > "$SRCDIR/main.c" << 'EOF'
+          #include <stdio.h>
+          #include <orbis/libkernel.h>
+
+          int main(void) {
+            printf("[roblox-ps4] bootstrap iniciado\n");
+            for (int i = 0; i < 5; i++) {
+              sceKernelUsleep(1000000);
+            }
+            printf("[roblox-ps4] bootstrap finalizado\n");
+            return 0;
+          }
+          EOF
+
+            sed -i -E \
+              -e "s|^TITLE[[:space:]]*:=.*|TITLE := ${APP_TITLE}|" \
+              -e "s|^TITLE_ID[[:space:]]*:=.*|TITLE_ID := ${TITLE_ID}|" \
+              -e "s|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID := ${CONTENT_ID}|" \
+              "$WORK/Makefile"
+          fi
+
+          echo "WORK_DIR=$WORK" >> "$GITHUB_ENV"
+          make -C "$WORK" -j"$(nproc)" EXTRAFLAGS="$OPT"
+
+      - name: Empacotar artefatos PS4
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/ps4_stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE" release_assets
+
+          find "$WORK_DIR" -type f \
+            \( -name 'eboot.bin' -o -name '*.pkg' -o -name '*.elf' -o -name '*.oelf' -o -name '*.prx' -o -name '*.gp4' \) \
+            -not -path '*/obj/*' -print -exec cp --parents {} "$STAGE" \;
+
+          if ! find "$STAGE" -type f \( -name 'eboot.bin' -o -name '*.pkg' \) | grep -q .; then
+            echo "::error::Nenhum eboot.bin/.pkg foi gerado. Veja o log do make acima."
+            exit 1
+          fi
+
+          (cd "$STAGE" && zip -r "$GITHUB_WORKSPACE/release_assets/ps4-${BUILD_CONFIG}.zip" .)
+
+          # PKG também solto na release, para baixar direto
+          find "$WORK_DIR" -type f -name '*.pkg' -not -path '*/obj/*' -exec cp {} release_assets/ \;
+
+          ls -lh release_assets
+
+      - name: Upload artefato PS4
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps4-release-assets
+          path: release_assets/
+          if-no-files-found: error
+
+  release:
+    name: Publicar GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [ build-ps4 ]
+    # Só publica em push na branch padrão ou execução manual (nunca em PR).
+    if: ${{ github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch) }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar artefatos
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-release-assets"
+          path: release_assets
+          merge-multiple: true
+
+      - name: Listar arquivos da release
+        shell: bash
+        run: ls -lh release_assets
+
+      - name: Mover a tag para este commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$RELEASE_TAG"
+
+      - name: Publicar no GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "PS4 Build ${{ env.RELEASE_TAG }} (${{ env.BUILD_CONFIG }})"
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: release_assets/*
