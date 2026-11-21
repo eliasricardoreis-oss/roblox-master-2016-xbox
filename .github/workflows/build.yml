@@ -20,7 +20,7 @@ on:
         required: true
         default: "latest-build"
       contribs_direct_url:
-        description: "Opcional: URL direta do Contribs.zip se o MediaFire bloquear o runner"
+        description: "Opcional: URL direta do Contribs.zip se o MediaFire bloquear"
         required: false
         default: ""
 
@@ -91,7 +91,6 @@ jobs:
             $html = Get-Content -Path $htmlFile -Raw -ErrorAction SilentlyContinue
             Remove-Item $htmlFile -Force -ErrorAction SilentlyContinue
 
-            # Tenta extrair link direto de download do HTML do MediaFire
             $match = [regex]::Match($html, 'https?://download[0-9]+\.mediafire\.com/[^"''\s<>]+Contribs\.zip[^"''\s<>]*')
             if (-not $match.Success) {
               $match = [regex]::Match($html, 'https?://[^"''\s<>]*mediafire\.com/[^"''\s<>]*Contribs\.zip[^"''\s<>]*')
@@ -99,9 +98,9 @@ jobs:
 
             if ($match.Success) {
               $downloadUrl = [System.Net.WebUtility]::HtmlDecode($match.Value)
-              Write-Host "Link direto encontrado."
+              Write-Host "Link direto do MediaFire encontrado."
             } else {
-              Write-Error "Não foi possível extrair link direto do MediaFire automaticamente (pode exigir resolução de desafio/sessão). Passe uma URL direta em contribs_direct_url no workflow_dispatch."
+              Write-Error "Não foi possível extrair o link direto do MediaFire. Se falhar, informe contribs_direct_url no workflow_dispatch."
               exit 1
             }
           }
@@ -113,24 +112,35 @@ jobs:
           $header = [System.Text.Encoding]::ASCII.GetString($bytes)
           if (-not $header.StartsWith("PK")) {
             Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-            Write-Error "O arquivo baixado não é um ZIP válido (cabeçalho '$header')."
+            Write-Error "O arquivo baixado não é um ZIP válido (retornou cabeçalho '$header')."
             exit 1
           }
 
           Write-Host "Extraindo com 7z..."
           7z x $zipFile -o"third_party" -mmt=on -y | Out-Null
           Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-          Write-Host "Contribs extraído e .zip removido para liberar espaço."
+          Write-Host "Contribs extraído e arquivo .zip deletado do disco."
 
-      - name: Compilar Boost (b2.exe) se presente
+      - name: Compilar Boost (b2.exe)
         shell: pwsh
         run: |
           $b2 = Get-ChildItem -Path "third_party" -Filter "b2.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($b2) {
             Push-Location $b2.DirectoryName
             $cfg = $env:BUILD_CONFIG.ToLower()
-            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$env:NUMBER_OF_PROCESSORS
+            
+            # Garante um valor numérico válido entre 1 e 256 para a opção -j
+            [int]$cpus = 2
+            if ($env:NUMBER_OF_PROCESSORS -and [int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$cpus)) {
+              if ($cpus -lt 1) { $cpus = 1 }
+              if ($cpus -gt 256) { $cpus = 256 }
+            }
+            Write-Host "Executando b2.exe com -j$cpus"
+            
+            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$cpus
             Pop-Location
+          } else {
+            Write-Host "b2.exe não encontrado em third_party. Seguindo direto para o MSBuild."
           }
 
       - name: Compilar XboxUWPClient.sln
@@ -138,9 +148,10 @@ jobs:
         run: |
           $sln = Get-ChildItem -Path . -Filter "XboxUWPClient.sln" -Recurse | Select-Object -First 1
           if (-not $sln) {
-            Write-Error "XboxUWPClient.sln não encontrado no repositório."
+            Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
+          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)]"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
@@ -157,10 +168,10 @@ jobs:
           if ($files.Count -gt 0) {
             Compress-Archive -Path $files.FullName -DestinationPath $winOut -Force
           } else {
-            "Nenhum binário gerado." | Out-File "release_assets\windows-build-info.txt"
+            "Nenhum binário gerado pelo MSBuild." | Out-File "release_assets\windows-build-info.txt"
           }
 
-      - name: Upload artefato Windows (para próximo job)
+      - name: Upload artefato Windows (para o job de Release)
         uses: actions/upload-artifact@v4
         with:
           name: win-release-assets
