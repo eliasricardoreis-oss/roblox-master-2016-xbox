@@ -105,7 +105,7 @@ jobs:
             }
           }
 
-          Write-Host "Baixando Contribs.zip no runner (com retomada automática se a conexão cair)..."
+          Write-Host "Baixando Contribs.zip no runner..."
           $maxAttempts = 10
           $attempt = 0
           while ($attempt -lt $maxAttempts) {
@@ -124,20 +124,19 @@ jobs:
               }
 
               $sizeMB = [math]::Round(((Get-Item $zipFile).Length / 1MB), 1)
-              Write-Host "Download concluído ($sizeMB MB). Testando integridade do ZIP com 7z..."
+              Write-Host "Download concluído ($sizeMB MB). Testando integridade com 7z..."
               7z t $zipFile -y | Out-Null
               if ($LASTEXITCODE -eq 0) {
                 Write-Host "ZIP íntegro!"
                 break
               } else {
-                Write-Warning "ZIP ainda parece incompleto ou corrompido (exit code $LASTEXITCODE). Tentando retomar/baixar novamente..."
+                Write-Warning "ZIP incompleto ou corrompido (exit code $LASTEXITCODE). Tentando retomar..."
                 if ($attempt -ge 5) {
-                  # Em tentativas mais altas, reinicia o arquivo caso tenha ficado dessincronizado
                   Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
                 }
               }
             } else {
-              Write-Warning "Falha no curl (exit code $LASTEXITCODE). Aguardando antes de tentar retomar..."
+              Write-Warning "Falha no curl (exit code $LASTEXITCODE). Aguardando retentativa..."
               Start-Sleep -Seconds 5
             }
 
@@ -155,7 +154,7 @@ jobs:
           }
 
           Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-          Write-Host "Contribs extraído com sucesso e arquivo .zip removido do disco."
+          Write-Host "Contribs extraído e arquivo .zip deletado do disco."
 
       - name: Compilar Boost (b2.exe) apenas se stage\lib não existir
         shell: pwsh
@@ -181,6 +180,20 @@ jobs:
             }
           }
 
+      - name: Retargeting de SDK nos arquivos .vcxproj (substituir 10.0.14393.0 por 10.0.26100.0)
+        shell: pwsh
+        run: |
+          Write-Host "Atualizando versão do Windows SDK nos arquivos .vcxproj..."
+          $targetSdk = "10.0.26100.0"
+          Get-ChildItem -Path . -Filter "*.vcxproj" -Recurse | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            if ($content -match "10\.0\.14393\.0") {
+              Write-Host "Substituindo SDK antigo em: $($_.Name)"
+              $newContent = $content -replace "10\.0\.14393\.0", $targetSdk
+              Set-Content -Path $_.FullName -Value $newContent -NoNewline
+            }
+          }
+
       - name: Compilar XboxUWPClient.sln
         shell: pwsh
         run: |
@@ -189,10 +202,12 @@ jobs:
             Write-Error "XboxUWPClient.sln não encontrado."
             exit 1
           }
-          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)]"
+          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK 10.0.26100.0"
           msbuild $sln.FullName `
             /p:Configuration=$env:BUILD_CONFIG `
             /p:Platform=$env:WIN_PLATFORM `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /p:WindowsTargetPlatformMinVersion=10.0.10240.0 `
             /m `
             /p:AppxBundle=Never
 
