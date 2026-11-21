@@ -147,6 +147,40 @@ jobs:
             echo "Sem prebuild.sh, pulando."
           fi
 
+      - name: Extrair zips das fontes da engine (se houver)
+        shell: bash
+        run: |
+          # zips na raiz/pastas do repo (Base.zip, Log.zip, Rendering-g3d.zip, ...) viram pastas em engine_src/
+          mkdir -p engine_src
+          find . -maxdepth 2 -type f -name '*.zip' -not -path './.git/*' -not -path './engine_src/*' -not -path './release_assets/*' | while read -r z; do
+            n=$(basename "$z" .zip | sed -E 's/^.*_[0-9a-f]{40}_//')
+            echo "Extraindo $z -> engine_src/$n"
+            mkdir -p "engine_src/$n"
+            if unzip -l "$z" | grep -q 'boost_1_56_0/boost/version.hpp'; then
+              # contribs.zip (boost 1.56 do Roblox): so os headers, o zip inteiro tem ~41 mil arquivos
+              unzip -q -o "$z" '*/boost_1_56_0/boost/*' -d "engine_src/$n" || true
+            else
+              unzip -q -o "$z" -d "engine_src/$n" || true
+            fi
+          done
+          ls engine_src || true
+          du -sh engine_src/* 2>/dev/null || true
+
+      - name: Gerar Makefile do PS4 automaticamente (gen_makefile.py)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PS4_PROJECT_DIR/gen_makefile.py" ]; then
+            echo "::warning::$PS4_PROJECT_DIR/gen_makefile.py nao existe; usando o fluxo bootstrap antigo."
+            exit 0
+          fi
+          # --probe compila cada .c/.cpp com clang (alvo PS4) e deixa no Makefile so o que compila
+          python3 "$PS4_PROJECT_DIR/gen_makefile.py" --root . --out "$PS4_PROJECT_DIR" --probe \
+            --toolchain "$OO_PS4_TOOLCHAIN" --title "$APP_TITLE" --title-id "$TITLE_ID" | tee gen_makefile.log
+          mkdir -p release_assets
+          cp gen_makefile.log release_assets/gen-makefile-report.txt
+          cp "$PS4_PROJECT_DIR/Makefile" release_assets/Makefile.generated
+
       - name: Compilar nucleo da engine para PS4 (relatorio de portabilidade)
         shell: bash
         continue-on-error: true
@@ -163,7 +197,12 @@ jobs:
             f=$(find "$ROOT" -type f -name "$1" -not -path '*/third_party/*' -not -path "$OUT/*" -not -path "$ROOT/ps4_bootstrap/*" 2>/dev/null | head -1)
             if [ -n "$f" ]; then dirname "$f"; fi
           }
-          ZLIB_DIR=$(find_mod adler32.c)
+          # zlib de verdade: pasta com crc32.c + deflate.c + zlib.h juntos
+          ZLIB_DIR=""
+          for c in $(find "$ROOT" -type f -name crc32.c -not -path '*/third_party/*' -not -path "$OUT/*" 2>/dev/null); do
+            d=$(dirname "$c")
+            if [ -f "$d/deflate.c" ] && [ -f "$d/zlib.h" ]; then ZLIB_DIR="$d"; break; fi
+          done
           G3D_DIR=$(dirname "$(find_mod GImage_png.cpp)" 2>/dev/null)
           [ "$G3D_DIR" = "." ] && G3D_DIR=""
           LOG_DIR=$(find_mod Log.vcxproj)
@@ -248,8 +287,17 @@ jobs:
           echo "===== ERROS MAIS COMUNS ====="
           cat release_assets/engine-top-errors.txt
 
-          if [ -f "$OUT/zlib/libzlibps4.a" ]; then
+          if [ -f "$OUT/zlib/libzlibps4.a" ] \
+             && nm "$OUT/zlib/libzlibps4.a" 2>/dev/null | grep -qE ' T crc32$' \
+             && nm "$OUT/zlib/libzlibps4.a" 2>/dev/null | grep -qE ' T zlibVersion$'; then
             echo "ENGINE_ZLIB_DIR=$OUT/zlib" >> "$GITHUB_ENV"
+            echo "zlib OK: crc32 e zlibVersion presentes na lib."
+          else
+            echo "AVISO: libzlibps4.a sem crc32/zlibVersion; NAO sera linkada. Diagnostico:"
+            echo "zlib dir: $ZLIB_DIR"
+            ls "$OUT/zlib" 2>/dev/null | head -40
+            grep '^FAIL' "$OUT/zlib/result.txt" 2>/dev/null | head -20
+            nm "$OUT/zlib/libzlibps4.a" 2>/dev/null | grep -i ' T ' | head -30
           fi
           exit 0
 
@@ -275,22 +323,116 @@ jobs:
             echo "zlib da engine será linkada: $ENGINE_ZLIB_DIR"
           fi
 
+          MAKE_VARS=()
           if [ -f "$PS4_PROJECT_DIR/Makefile" ]; then
             echo ">>> Modo REPO: usando $PS4_PROJECT_DIR/Makefile"
             WORK="$PS4_PROJECT_DIR"
           else
-            echo ">>> Modo BOOTSTRAP: '$PS4_PROJECT_DIR/Makefile' não existe; gerando launcher mínimo a partir do sample hello_world"
+            echo ">>> Modo BOOTSTRAP: '$PS4_PROJECT_DIR/Makefile' não existe; gerando projeto + Makefile próprios"
+            MAKE_VARS=(TITLE="$APP_TITLE" TITLE_ID="$TITLE_ID" CONTENT_ID="$CONTENT_ID" EXTRA_LIBS="$ENGINE_LIBS")
             WORK="$PWD/ps4_bootstrap"
             rm -rf "$WORK"
-            cp -r "$OO_PS4_TOOLCHAIN/samples/hello_world" "$WORK"
+            mkdir -p "$WORK/src" "$WORK/sce_sys/about" "$WORK/sce_module"
+            SRCDIR="$WORK/src"
 
-            # O Makefile do OpenOrbis compila "<nome da pasta do projeto>/*.c(pp)":
-            # a pasta de fontes TEM que ter o mesmo nome da pasta do projeto.
-            echo "Estrutura do sample:"
-            find "$WORK" -maxdepth 2
-            find "$WORK" -type f \( -name '*.c' -o -name '*.cpp' \) -delete
-            SRCDIR="$WORK/$(basename "$WORK")"
-            mkdir -p "$SRCDIR"
+            # Módulos de runtime do OpenOrbis (binários), copiados de onde o toolchain os tiver
+            for f in libc.prx libSceFios2.prx; do
+              p=$(find "$OO_PS4_TOOLCHAIN" -name "$f" -type f | head -1)
+              if [ -n "$p" ]; then cp "$p" "$WORK/sce_module/"; else echo "AVISO: $f não encontrado no toolchain"; fi
+            done
+            p=$(find "$OO_PS4_TOOLCHAIN" -name right.sprx -type f | head -1)
+            if [ -n "$p" ]; then cp "$p" "$WORK/sce_sys/about/"; else echo "AVISO: right.sprx não encontrado no toolchain"; fi
+
+            # Ícone próprio 512x512 (quadrado azul com o "bloco" branco), gerado aqui
+            python3 - "$WORK/sce_sys/icon0.png" << 'PY'
+          import sys, zlib, struct
+          W = H = 512
+          BLUE = (0, 162, 255, 255)
+          WHITE = (255, 255, 255, 255)
+          def px(x, y):
+              if 150 <= x < 362 and 150 <= y < 362:
+                  return BLUE if (205 <= x < 307 and 205 <= y < 307) else WHITE
+              return BLUE
+          raw = bytearray()
+          for y in range(H):
+              raw.append(0)
+              for x in range(W):
+                  raw.extend(px(x, y))
+          def chunk(t, d):
+              c = struct.pack('>I', len(d)) + t + d
+              return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+          png = (b'\x89PNG\r\n\x1a\n'
+                 + chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 6, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+                 + chunk(b'IEND', b''))
+          open(sys.argv[1], 'wb').write(png)
+          PY
+
+            # Makefile próprio (usa .RECIPEPREFIX para não depender de TAB)
+            cat > "$WORK/Makefile" << 'MK'
+          .RECIPEPREFIX := >
+          # Makefile gerado pelo CI - não depende do sample hello_world do OpenOrbis
+          TITLE      ?= Roblox 2016 PS4
+          TITLE_ID   ?= RBLX00001
+          CONTENT_ID ?= IV0000-RBLX00001_00-ROBLOXPS4BOOT000
+          VERSION    ?= 1.00
+          EXTRAFLAGS ?=
+          EXTRA_LIBS ?=
+
+          TC     := $(OO_PS4_TOOLCHAIN)
+          BIN    := $(TC)/bin/linux
+          OBJDIR := obj
+
+          CSRC   := $(wildcard src/*.c)
+          CXXSRC := $(wildcard src/*.cpp)
+          OBJS   := $(patsubst src/%.c,$(OBJDIR)/%.o,$(CSRC)) $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(CXXSRC))
+
+          CFLAGS   := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c $(EXTRAFLAGS) -isysroot $(TC) -isystem $(TC)/include
+          CXXFLAGS := $(CFLAGS) -isystem $(TC)/include/c++/v1
+          LIBS     := $(EXTRA_LIBS) -lc -lkernel -lc++ -lSceVideoOut -lScePad -lSceUserService
+          LDFLAGS  := -m elf_x86_64 -pie --script $(TC)/link.x --eh-frame-hdr -L$(TC)/lib $(LIBS) $(TC)/lib/crt1.o
+
+          PKGFILES := eboot.bin sce_sys/param.sfo sce_sys/icon0.png $(wildcard sce_sys/about/right.sprx) $(wildcard sce_module/*.prx)
+
+          all: $(CONTENT_ID).pkg
+
+          $(OBJDIR)/%.o: src/%.c
+          > mkdir -p $(OBJDIR)
+          > clang $(CFLAGS) -o $@ $<
+
+          $(OBJDIR)/%.o: src/%.cpp
+          > mkdir -p $(OBJDIR)
+          > clang++ $(CXXFLAGS) -o $@ $<
+
+          app.elf: $(OBJS)
+          > ld.lld $(OBJS) -o $@ $(LDFLAGS)
+
+          eboot.bin: app.elf
+          > $(BIN)/create-fself -in=app.elf -out=app.oelf --eboot "eboot.bin" --paid 0x3800000000000011
+
+          sce_sys/param.sfo: Makefile
+          > rm -f $@
+          > $(BIN)/PkgTool.Core sfo_new $@
+          > $(BIN)/PkgTool.Core sfo_setentry $@ APP_TYPE --type Integer --maxsize 4 --value 1
+          > $(BIN)/PkgTool.Core sfo_setentry $@ APP_VER --type Utf8 --maxsize 8 --value '$(VERSION)'
+          > $(BIN)/PkgTool.Core sfo_setentry $@ ATTRIBUTE --type Integer --maxsize 4 --value 0
+          > $(BIN)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
+          > $(BIN)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
+          > $(BIN)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
+          > $(BIN)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value 0
+          > $(BIN)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
+          > $(BIN)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
+          > $(BIN)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
+
+          $(CONTENT_ID).pkg: eboot.bin sce_sys/param.sfo sce_sys/icon0.png
+          > $(BIN)/create-gp4 -out pkg.gp4 --content-id=$(CONTENT_ID) --files "$(PKGFILES)"
+          > $(BIN)/PkgTool.Core pkg_build pkg.gp4 .
+
+          clean:
+          > rm -rf $(OBJDIR) app.elf app.oelf eboot.bin pkg.gp4 sce_sys/param.sfo *.pkg
+
+          .PHONY: all clean
+          MK
 
             cat > "$SRCDIR/main.c" << 'EOF'
           #include <stdio.h>
@@ -543,20 +685,10 @@ jobs:
               echo '};'
               echo 'const int ENGINE_REPORT_N = sizeof(ENGINE_REPORT) / sizeof(ENGINE_REPORT[0]);'
             } > "$SRCDIR/engine_status.c"
-
-            sed -i -E \
-              -e "s|^TITLE[[:space:]]*:=.*|TITLE := ${APP_TITLE}|" \
-              -e "s|^TITLE_ID[[:space:]]*:=.*|TITLE_ID := ${TITLE_ID}|" \
-              -e "s|^CONTENT_ID[[:space:]]*:=.*|CONTENT_ID := ${CONTENT_ID}|" \
-              -e "s|^LIBS[[:space:]]*:=.*|LIBS := -lc -lkernel -lc++ -lSceVideoOut -lScePad -lSceUserService ${ENGINE_LIBS}|" \
-              "$WORK/Makefile"
           fi
 
           echo "WORK_DIR=$WORK" >> "$GITHUB_ENV"
-          echo "--- stubs/headers de video e pad no toolchain ---"
-          ls "$OO_PS4_TOOLCHAIN/lib" | grep -Ei 'VideoOut|ScePad|UserService' || true
-          grep -n "DirectMemory" "$OO_PS4_TOOLCHAIN/include/orbis/libkernel.h" | head -5 || true
-          make -C "$WORK" -j"$(nproc)" EXTRAFLAGS="$OPT"
+          make -C "$WORK" -j"$(nproc)" EXTRAFLAGS="$OPT" "${MAKE_VARS[@]}"
 
       - name: Empacotar artefatos PS4
         shell: bash
@@ -583,7 +715,7 @@ jobs:
           # Se o projeto foi gerado automaticamente, exporta para você commitar como ps4/
           if [ -d "$GITHUB_WORKSPACE/ps4_bootstrap" ]; then
             (cd "$GITHUB_WORKSPACE" && zip -r release_assets/ps4-project-template.zip ps4_bootstrap \
-              -x '*/x64/*' '*.o' '*.elf' '*.oelf' '*.pkg' '*.gp4' 'ps4_bootstrap/eboot.bin')
+              -x '*/x64/*' '*/obj/*' '*.o' '*.elf' '*.oelf' '*.pkg' '*.gp4' 'ps4_bootstrap/eboot.bin')
           fi
 
           ls -lh release_assets
