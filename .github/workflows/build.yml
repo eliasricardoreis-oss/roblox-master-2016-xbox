@@ -76,7 +76,7 @@ jobs:
             }
           }
 
-      - name: Baixar e extrair Contribs.zip na nuvem (sem mexer no seu PC)
+      - name: Baixar e extrair Contribs.zip na nuvem
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "third_party" -Force | Out-Null
@@ -128,16 +128,15 @@ jobs:
           if ($b2) {
             Push-Location $b2.DirectoryName
             $cfg = $env:BUILD_CONFIG.ToLower()
-            
-            # Garante um valor numérico válido entre 1 e 256 para a opção -j
+
             [int]$cpus = 2
             if ($env:NUMBER_OF_PROCESSORS -and [int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$cpus)) {
               if ($cpus -lt 1) { $cpus = 1 }
               if ($cpus -gt 256) { $cpus = 256 }
             }
-            Write-Host "Executando b2.exe com -j$cpus"
-            
-            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j$cpus
+            Write-Host "Executando b2.exe com -j $cpus"
+
+            .\b2.exe --build-type=minimal link=static runtime-link=shared variant=$cfg -j $cpus
             Pop-Location
           } else {
             Write-Host "b2.exe não encontrado em third_party. Seguindo direto para o MSBuild."
