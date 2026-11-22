@@ -22,6 +22,14 @@ on:
         description: "Platform"
         required: false
         default: "Durango"
+      toolset:
+        description: "PlatformToolset (v141, v140, v120 ou v110)"
+        required: false
+        default: "v141"
+      project:
+        description: "Projeto a compilar (vazio = solution inteira)"
+        required: false
+        default: "XboxClient\\XboxClient.vcxproj"
 
 jobs:
   build-xdk:
@@ -33,6 +41,8 @@ jobs:
       XDK_ARGS: ${{ inputs.xdk_install_args }}
       BUILD_CFG: ${{ inputs.configuration }}
       BUILD_PLAT: ${{ inputs.platform }}
+      XDK_TOOLSET: ${{ inputs.toolset }}
+      XDK_PROJECT: ${{ inputs.project }}
 
     steps:
       - name: Checkout Repository
@@ -51,7 +61,7 @@ jobs:
           Remove-Item -Force "D:\xdk_dl\xdk.zip"
           Get-ChildItem "D:\xdk" -Recurse -Depth 2 | Select-Object -First 80 FullName | Format-Table -HideTableHeaders
 
-      # ---------- 2) VS 2017 Build Tools (o XDK de 2018 integra com ele) ----------
+      # ---------- 2) VS 2017 Build Tools ----------
       - name: Install VS 2017 Build Tools
         continue-on-error: true
         shell: pwsh
@@ -66,12 +76,11 @@ jobs:
           Write-Host "VS2017 Build Tools saiu com codigo $($p.ExitCode)"
           if (Test-Path "C:\BuildTools2017\MSBuild\15.0\Bin\MSBuild.exe") { Write-Host "MSBuild 2017 OK" } else { Write-Host "::warning::VS2017 Build Tools nao instalou" }
 
-      # ---------- 3) Instalar o XDK ----------
+      # ---------- 3) Instalar o XDK (com monitoramento) ----------
       - name: Install Xbox One XDK
         continue-on-error: true
         shell: pwsh
         run: |
-          # Redistributables (PIX, Speech runtime...)
           Get-ChildItem "D:\xdk" -Recurse -Filter *.msi | Where-Object { $_.FullName -match "Redistributable" } | ForEach-Object {
             Write-Host "msiexec: $($_.FullName)"
             $m = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @("/i","`"$($_.FullName)`"","/qn","/norestart")
@@ -82,8 +91,17 @@ jobs:
           if ($exe) {
             Write-Host "Rodando: $($exe.FullName) $env:XDK_ARGS"
             $p = Start-Process $exe.FullName -ArgumentList $env:XDK_ARGS -PassThru
-            if (-not $p.WaitForExit(3600000)) { Write-Host "::warning::Instalador passou de 60 min, encerrando"; $p.Kill() }
-            Write-Host "XboxOneXDK.exe saiu com codigo $($p.ExitCode)"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $limit = 40 * 60
+            while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $limit) {
+              Start-Sleep -Seconds 60
+              Write-Host "---- $([int]$sw.Elapsed.TotalMinutes) min ----"
+              Get-Process | Where-Object { $_.Name -match "msiexec|XboxOne|XDK|setup|dotnet|vs_|Windows6|wusa|dism" } |
+                Select-Object -First 8 Name, Id, @{n="CPU(s)";e={[int]$_.CPU}} | Format-Table -HideTableHeaders | Out-String | Write-Host
+              if (Test-Path "D:\xdk_install.log") { Write-Host "[xdk_install.log]"; Get-Content "D:\xdk_install.log" -Tail 4 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" } }
+            }
+            if (-not $p.HasExited) { Write-Host "::warning::Instalador passou de 40 min, encerrando"; Stop-Process -Id $p.Id -Force }
+            else { Write-Host "XboxOneXDK.exe saiu com codigo $($p.ExitCode)" }
           } else {
             $cmd = Get-ChildItem "D:\xdk" -Recurse -Filter "InstallXboxOneDKs.cmd" | Select-Object -First 1
             if ($cmd) {
@@ -161,6 +179,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path "logs" | Out-Null
           $repo = (Get-Location).Path
 
+          # ----- diagnostico do XDK -----
+          Write-Host "===== DurangoXDK = $env:DurangoXDK ====="
+          if ($env:DurangoXDK -and (Test-Path $env:DurangoXDK)) {
+            Get-ChildItem $env:DurangoXDK -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 60 -ExpandProperty FullName
+          } else { Write-Host "Pasta do XDK nao existe!" }
+
+          Write-Host "===== Integracoes Durango no MSBuild ====="
+          Get-ChildItem "${env:ProgramFiles(x86)}\MSBuild","C:\BuildTools2017\Common7\IDE\VC\VCTargets","C:\BuildTools2017\MSBuild" -Recurse -Directory -Filter "Durango" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host $_.FullName
+              Get-ChildItem (Join-Path $_.FullName "PlatformToolsets") -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    toolset: $($_.Name)" }
+            }
+
+          $props = "${env:ProgramFiles(x86)}\MSBuild\Microsoft.Cpp\v4.0\V110\Platforms\Durango\Microsoft.Cpp.Durango.default.props"
+          if (Test-Path $props) {
+            Write-Host "===== $props (linhas 10-35) ====="
+            Get-Content $props | Select-Object -Skip 9 -First 26 | ForEach-Object { Write-Host $_ }
+          }
+          Write-Host "===== Variaveis XDK ====="
+          Get-ChildItem env: | Where-Object { $_.Name -match "Durango|XDK|Xbox" } | ForEach-Object { Write-Host "$($_.Name)=$($_.Value)" }
+          Write-Host "====================================="
+
+          # ----- build -----
           $root = $repo
           $nested = Get-ChildItem -Path $repo -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
           if (-not (Test-Path (Join-Path $repo "App")) -and $nested) { $root = $nested.FullName }
@@ -179,27 +220,28 @@ jobs:
           $env:CL  = (($extraInc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS /D_SCL_SECURE_NO_WARNINGS /FS"
           $env:_CL_ = "/WX- /w /Zc:strictStrings-"
 
-          $allSlns = Get-ChildItem -Path $root -Filter "*.sln" -Recurse -Depth 5
-          $sln = $allSlns | Where-Object { $_.Name -notmatch "CSharp" -and $_.Name -match "Client" } | Select-Object -First 1
-          if (-not $sln) { $sln = $allSlns | Select-Object -First 1 }
-          if (-not $sln) { Write-Error "Nenhum .sln encontrado"; exit 1 }
-          Write-Host "Solution: $($sln.FullName)"
+          $target = $null
+          if ($env:XDK_PROJECT) {
+            $cand = Join-Path $root $env:XDK_PROJECT
+            if (Test-Path $cand) { $target = $cand } else { Write-Host "Projeto '$env:XDK_PROJECT' nao encontrado, usando a solution." }
+          }
+          if (-not $target) {
+            $allSlns = Get-ChildItem -Path $root -Filter "*.sln" -Recurse -Depth 5
+            $sln = $allSlns | Where-Object { $_.Name -notmatch "CSharp" -and $_.Name -match "Client" } | Select-Object -First 1
+            if (-not $sln) { $sln = $allSlns | Select-Object -First 1 }
+            if (-not $sln) { Write-Error "Nenhum .sln encontrado"; exit 1 }
+            $target = $sln.FullName
+            $slnContent = Get-Content -Path $target -Raw
+            $configs = [regex]::Matches($slnContent, '^\s*([^|=\r\n\s][^|=\r\n]*)\|([^=\r\n]+)\s*=', 'Multiline') |
+              ForEach-Object { "$($_.Groups[1].Value.Trim())|$($_.Groups[2].Value.Trim())" } | Select-Object -Unique
+            Write-Host "Configuracoes da solution:"; $configs | ForEach-Object { Write-Host "  $_" }
+          }
+          Write-Host "Alvo: $target | Toolset: $env:XDK_TOOLSET | $env:BUILD_CFG|$env:BUILD_PLAT"
 
-          $slnContent = Get-Content -Path $sln.FullName -Raw
-          $configs = [regex]::Matches($slnContent, '^\s*([^|=\r\n\s][^|=\r\n]*)\|([^=\r\n]+)\s*=', 'Multiline') |
-            ForEach-Object { "$($_.Groups[1].Value.Trim())|$($_.Groups[2].Value.Trim())" } | Select-Object -Unique
-          Write-Host "Configuracoes da solution:"; $configs | ForEach-Object { Write-Host "  $_" }
-
-          $want = "$env:BUILD_CFG|$env:BUILD_PLAT"
-          $chosen = $configs | Where-Object { $_ -ieq $want } | Select-Object -First 1
-          if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "\|Durango$" -and $_ -match "^Release" } | Select-Object -First 1 }
-          if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "\|Durango$" } | Select-Object -First 1 }
-          if (-not $chosen) { Write-Error "Nenhuma configuracao Durango na solution (veja a lista acima)."; exit 1 }
-          $parts = $chosen.Split('|',2)
-          Write-Host "Usando Configuration='$($parts[0])' Platform='$($parts[1])'"
-
-          & $msb $sln.FullName `
-            "/p:Configuration=$($parts[0])" "/p:Platform=$($parts[1])" `
+          & $msb $target `
+            "/p:Configuration=$env:BUILD_CFG" "/p:Platform=$env:BUILD_PLAT" `
+            "/p:PlatformToolset=$env:XDK_TOOLSET" `
+            "/p:VisualStudioVersion=15.0" `
             "/p:CONTRIB_PATH=$env:CONTRIB_PATH" `
             "/p:DurangoXDK=$env:DurangoXDK" `
             "/p:TreatWarningAsError=false" `
