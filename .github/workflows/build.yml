@@ -1,181 +1,238 @@
-name: Build Windows EXE (2016 Source)
+name: Build via Xbox One XDK (teste)
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      xdk_url:
+        description: "URL direta do zip do Xbox One XDK"
+        required: true
+      contribs_url:
+        description: "URL direta do Contribs.zip (opcional se houver pasta Contribs no repo)"
+        required: false
+        default: ""
+      xdk_install_args:
+        description: "Argumentos do XboxOneXDK.exe"
+        required: false
+        default: "/quiet /norestart /log D:\\xdk_install.log"
+      configuration:
+        description: "Configuration"
+        required: false
+        default: "Release"
+      platform:
+        description: "Platform"
+        required: false
+        default: "Durango"
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build-xdk:
+    runs-on: windows-2022
+    timeout-minutes: 330
+    env:
+      XDK_URL: ${{ inputs.xdk_url }}
+      CONTRIBS_URL: ${{ inputs.contribs_url }}
+      XDK_ARGS: ${{ inputs.xdk_install_args }}
+      BUILD_CFG: ${{ inputs.configuration }}
+      BUILD_PLAT: ${{ inputs.platform }}
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Cache Boost Headers
-        uses: actions/cache@v4
-        with:
-          path: third_party/boost
-          key: win-boost-1.58.0-v2
-
-      - name: Download & Extract Boost Headers (1.58.0)
+      # ---------- 1) Baixar e extrair o XDK ----------
+      - name: Download & extract Xbox One XDK
         shell: pwsh
         run: |
-          if (-not (Test-Path "third_party/boost/boost/functional/hash.hpp")) {
-            Remove-Item -Recurse -Force "third_party/boost" -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force -Path "third_party/boost" | Out-Null
-            curl.exe -sL "https://archives.boost.io/release/1.58.0/source/boost_1_58_0.tar.bz2" -o "boost.tar.bz2"
-            tar.exe -xjf "boost.tar.bz2" -C "third_party/boost" --strip-components=1 "boost_1_58_0/boost"
+          New-Item -ItemType Directory -Force -Path "D:\xdk_dl","D:\xdk" | Out-Null
+          Write-Host "Baixando XDK..."
+          curl.exe -L --fail --retry 3 -o "D:\xdk_dl\xdk.zip" "$env:XDK_URL"
+          if ($LASTEXITCODE -ne 0) { Write-Error "Falha ao baixar o XDK (link invalido/expirado?)"; exit 1 }
+          Write-Host "Extraindo..."
+          7z x "D:\xdk_dl\xdk.zip" "-oD:\xdk" -y | Select-Object -Last 5
+          Remove-Item -Force "D:\xdk_dl\xdk.zip"
+          Get-ChildItem "D:\xdk" -Recurse -Depth 2 | Select-Object -First 80 FullName | Format-Table -HideTableHeaders
+
+      # ---------- 2) VS 2017 Build Tools (o XDK de 2018 integra com ele) ----------
+      - name: Install VS 2017 Build Tools
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          curl.exe -L --fail -o "$env:RUNNER_TEMP\vs2017bt.exe" "https://aka.ms/vs/15/release/vs_buildtools.exe"
+          $p = Start-Process "$env:RUNNER_TEMP\vs2017bt.exe" -Wait -PassThru -ArgumentList @(
+            "--quiet","--wait","--norestart","--nocache",
+            "--installPath","C:\BuildTools2017",
+            "--add","Microsoft.VisualStudio.Workload.VCTools",
+            "--includeRecommended"
+          )
+          Write-Host "VS2017 Build Tools saiu com codigo $($p.ExitCode)"
+          if (Test-Path "C:\BuildTools2017\MSBuild\15.0\Bin\MSBuild.exe") { Write-Host "MSBuild 2017 OK" } else { Write-Host "::warning::VS2017 Build Tools nao instalou" }
+
+      # ---------- 3) Instalar o XDK ----------
+      - name: Install Xbox One XDK
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Redistributables (PIX, Speech runtime...)
+          Get-ChildItem "D:\xdk" -Recurse -Filter *.msi | Where-Object { $_.FullName -match "Redistributable" } | ForEach-Object {
+            Write-Host "msiexec: $($_.FullName)"
+            $m = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @("/i","`"$($_.FullName)`"","/qn","/norestart")
+            Write-Host "  codigo $($m.ExitCode)"
+          }
+
+          $exe = Get-ChildItem "D:\xdk" -Recurse -Filter "XboxOneXDK.exe" | Select-Object -First 1
+          if ($exe) {
+            Write-Host "Rodando: $($exe.FullName) $env:XDK_ARGS"
+            $p = Start-Process $exe.FullName -ArgumentList $env:XDK_ARGS -PassThru
+            if (-not $p.WaitForExit(3600000)) { Write-Host "::warning::Instalador passou de 60 min, encerrando"; $p.Kill() }
+            Write-Host "XboxOneXDK.exe saiu com codigo $($p.ExitCode)"
+          } else {
+            $cmd = Get-ChildItem "D:\xdk" -Recurse -Filter "InstallXboxOneDKs.cmd" | Select-Object -First 1
+            if ($cmd) {
+              Write-Host "Rodando $($cmd.FullName)"
+              Push-Location (Split-Path $cmd.FullName)
+              cmd.exe /c "`"$($cmd.FullName)`""
+              Pop-Location
+            } else { Write-Host "::warning::Nenhum instalador do XDK encontrado" }
+          }
+
+      - name: Detect XDK
+        shell: pwsh
+        run: |
+          $xdk = [Environment]::GetEnvironmentVariable("DurangoXDK","Machine")
+          if (-not $xdk) {
+            $cand = Get-ChildItem "${env:ProgramFiles(x86)}","C:\Program Files","D:\" -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "Durango|Xbox.*XDK" } | Select-Object -First 1
+            if ($cand) {
+              $sub = Get-ChildItem $cand.FullName -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+              $xdk = if ($sub) { $sub.FullName } else { $cand.FullName }
+            }
+          }
+          if ($xdk) {
+            if (-not $xdk.EndsWith("\")) { $xdk += "\" }
+            Write-Host "DurangoXDK=$xdk"
+            "DurangoXDK=$xdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            Write-Host "::warning::XDK nao detectado apos a instalacao (veja os logs)"
+          }
+          Get-ChildItem "C:\BuildTools2017\MSBuild" -Recurse -Directory -Filter "Durango" -ErrorAction SilentlyContinue | Select-Object -First 3 FullName
+
+      # ---------- 4) CONTRIB_PATH ----------
+      - name: Prepare Contribs (CONTRIB_PATH)
+        shell: pwsh
+        run: |
+          $ws = (Get-Location).Path
+          $contrib = $null
+          $local = Get-ChildItem -Path $ws -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
+          if ($local) { $contrib = $local.FullName }
+
+          if (-not $contrib -and $env:CONTRIBS_URL) {
+            New-Item -ItemType Directory -Force -Path "D:\contribs_ext" | Out-Null
+            curl.exe -L --fail --retry 3 -o "D:\contribs.zip" "$env:CONTRIBS_URL"
+            if ($LASTEXITCODE -ne 0) { Write-Error "Falha ao baixar Contribs.zip"; exit 1 }
+            7z x "D:\contribs.zip" "-oD:\contribs_ext" -y | Select-Object -Last 3
+            Remove-Item -Force "D:\contribs.zip"
+            $contrib = "D:\contribs_ext"
+            $inner = Get-ChildItem $contrib -Directory | Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
+            if ($inner) { $contrib = $inner.FullName }
+          }
+
+          if (-not $contrib) {
+            Write-Host "Sem Contribs: usando so Boost 1.56.0"
+            New-Item -ItemType Directory -Force -Path "$ws\third_party\boost" | Out-Null
+            curl.exe -sL --fail "https://archives.boost.io/release/1.56.0/source/boost_1_56_0.tar.bz2" -o "boost.tar.bz2"
+            tar.exe -xjf "boost.tar.bz2" -C "third_party/boost" --strip-components=1 "boost_1_56_0/boost"
             Remove-Item -Force "boost.tar.bz2"
+            $contrib = "$ws\third_party"
           }
-          if (-not (Test-Path "third_party/boost/boost/functional/hash.hpp")) {
-            Write-Error "Boost nao foi extraido corretamente (hash.hpp ausente)."
-            exit 1
-          }
-          Write-Host "Boost OK: $((Get-Item 'third_party/boost/boost/functional/hash.hpp').FullName)"
 
-      - name: Setup Visual Studio Developer Environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+          $ver = Get-ChildItem -Path $contrib -Filter "version.hpp" -Recurse -Depth 6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\boost\\version\.hpp$' } | Select-Object -First 1
+          if (-not $ver) { Write-Error "boost\version.hpp nao encontrado em $contrib"; exit 1 }
+          $boostRoot = Split-Path (Split-Path $ver.FullName)
+          Write-Host "CONTRIB_PATH=$contrib | BOOST_ROOT=$boostRoot"
+          "CONTRIB_PATH=$contrib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BOOST_ROOT=$boostRoot"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Build Windows Project
+      # ---------- 5) Build ----------
+      - name: Build (Durango)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
+          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
           $repo = (Get-Location).Path
-          $boostInc = "$repo\third_party\boost"
 
-          # Detecta a raiz real do projeto (pode haver pasta aninhada)
           $root = $repo
           $nested = Get-ChildItem -Path $repo -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
           if (-not (Test-Path (Join-Path $repo "App")) -and $nested) { $root = $nested.FullName }
-          Write-Host "Raiz do projeto: $root"
 
-          # Headers ATL/MFC dentro do MSVC (corrige 'atlbase.h')
-          $atlInc = @()
-          if ($env:VCToolsInstallDir) {
-            Get-ChildItem -Path $env:VCToolsInstallDir -Filter "atlbase.h" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-              $dir = Split-Path $_.FullName
-              if ($dir -notin $atlInc) { $atlInc += $dir }
-            }
+          $msb = "C:\BuildTools2017\MSBuild\15.0\Bin\MSBuild.exe"
+          if (-not (Test-Path $msb)) {
+            Write-Host "::warning::Usando MSBuild do VS 2022 (Durango provavelmente nao vai existir)"
+            $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $msb = & $vsw -latest -products * -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
           }
+          Write-Host "MSBuild: $msb"
 
-          $extraInc = @($boostInc, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") + $atlInc
-          $extraInc = $extraInc | Where-Object { Test-Path $_ }
-
-          # INCLUDE sozinho e ignorado pelo MSBuild; a variavel CL e lida diretamente pelo cl.exe
+          $extraInc = @($env:BOOST_ROOT, $env:CONTRIB_PATH, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") |
+            Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
           $env:INCLUDE = (($extraInc -join ";") + ";" + $env:INCLUDE)
-          $env:CL = (($extraInc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /permissive- /FS /MP1"
-          Write-Host "CL=$env:CL"
-
-          # PlatformToolset e Windows SDK
-          $toolset = "v143"
-          if ($env:VCToolsVersion) {
-            $major = [int]($env:VCToolsVersion.Split('.')[0])
-            $minor = [int]($env:VCToolsVersion.Split('.')[1])
-            if ($major -ge 15 -or $minor -ge 50) { $toolset = "v145" }
-            else { $toolset = "v143" }
-          }
-
-          $winSdkRoot = "C:\Program Files (x86)\Windows Kits\10\Include"
-          $sdkVer = "10.0.22621.0"
-          if (Test-Path $winSdkRoot) {
-            $latestSdk = Get-ChildItem -Path $winSdkRoot -Directory |
-              Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-              Sort-Object { [version]$_.Name } -Descending |
-              Select-Object -First 1
-            if ($latestSdk) { $sdkVer = $latestSdk.Name }
-          }
+          $env:CL  = (($extraInc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS /D_SCL_SECURE_NO_WARNINGS /FS"
+          $env:_CL_ = "/WX- /w /Zc:strictStrings-"
 
           $allSlns = Get-ChildItem -Path $root -Filter "*.sln" -Recurse -Depth 5
           $sln = $allSlns | Where-Object { $_.Name -notmatch "CSharp" -and $_.Name -match "Client" } | Select-Object -First 1
           if (-not $sln) { $sln = $allSlns | Select-Object -First 1 }
+          if (-not $sln) { Write-Error "Nenhum .sln encontrado"; exit 1 }
+          Write-Host "Solution: $($sln.FullName)"
 
-          $failed = $false
+          $slnContent = Get-Content -Path $sln.FullName -Raw
+          $configs = [regex]::Matches($slnContent, '^\s*([^|=\r\n\s][^|=\r\n]*)\|([^=\r\n]+)\s*=', 'Multiline') |
+            ForEach-Object { "$($_.Groups[1].Value.Trim())|$($_.Groups[2].Value.Trim())" } | Select-Object -Unique
+          Write-Host "Configuracoes da solution:"; $configs | ForEach-Object { Write-Host "  $_" }
 
-          if ($sln) {
-            Write-Host "Compilando Solution: $($sln.FullName)"
-            $slnContent = Get-Content -Path $sln.FullName -Raw
-            $configs = [regex]::Matches($slnContent, '^\s*(Debug|Release)\|([^=\r\n]+)\s*=', 'Multiline') |
-              ForEach-Object { "$($_.Groups[1].Value)|$($_.Groups[2].Value.Trim())" } |
-              Select-Object -Unique
+          $want = "$env:BUILD_CFG|$env:BUILD_PLAT"
+          $chosen = $configs | Where-Object { $_ -ieq $want } | Select-Object -First 1
+          if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "\|Durango$" -and $_ -match "^Release" } | Select-Object -First 1 }
+          if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "\|Durango$" } | Select-Object -First 1 }
+          if (-not $chosen) { Write-Error "Nenhuma configuracao Durango na solution (veja a lista acima)."; exit 1 }
+          $parts = $chosen.Split('|',2)
+          Write-Host "Usando Configuration='$($parts[0])' Platform='$($parts[1])'"
 
-            $chosen = $configs | Where-Object { $_ -match "^Release\|(Win32|x64|x86)$" } | Select-Object -First 1
-            if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "^Release\|" } | Select-Object -First 1 }
-            if (-not $chosen) { $chosen = $configs | Select-Object -First 1 }
+          & $msb $sln.FullName `
+            "/p:Configuration=$($parts[0])" "/p:Platform=$($parts[1])" `
+            "/p:CONTRIB_PATH=$env:CONTRIB_PATH" `
+            "/p:DurangoXDK=$env:DurangoXDK" `
+            "/p:TreatWarningAsError=false" `
+            /maxCpuCount:1 /nologo /v:minimal `
+            "/flp:LogFile=$repo\logs\build.log;Verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { Write-Host "BUILD FALHOU ($LASTEXITCODE)"; exit 1 }
 
-            $cfg = "Release"
-            $plat = "Win32"
-            if ($chosen) {
-              $parts = $chosen.Split('|', 2)
-              $cfg = $parts[0]
-              $plat = $parts[1]
-            }
+      # ---------- 6) Artefatos ----------
+      - name: Collect install logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
+          if (Test-Path "D:\xdk_install.log") { Copy-Item "D:\xdk_install.log" "logs\" }
+          Get-ChildItem $env:TEMP -Filter "*.log" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt (Get-Date).AddHours(-6) -and $_.Length -lt 50MB } |
+            Select-Object -First 30 | ForEach-Object { Copy-Item $_.FullName "logs\" -ErrorAction SilentlyContinue }
 
-            Write-Host "Usando Configuration='$cfg', Platform='$plat', Toolset='$toolset', SDK='$sdkVer'"
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdk-build-logs
+          path: logs/**
+          if-no-files-found: ignore
 
-            $targetProjects = @(
-              "WindowsClient\WindowsClient.vcxproj",
-              "RobloxStudio\RobloxStudio.vcxproj",
-              "App\App.vcxproj",
-              "Network\Network.vcxproj"
-            ) | Where-Object { Test-Path (Join-Path $root $_) }
-
-            $msbArgs = @(
-              "/p:Configuration=$cfg",
-              "/p:Platform=$plat",
-              "/p:PlatformToolset=$toolset",
-              "/p:WindowsTargetPlatformVersion=$sdkVer",
-              "/p:PostBuildEventUseInBuild=false",
-              "/p:PreBuildEventUseInBuild=false",
-              "/p:WarningLevel=0",
-              "/p:TreatWarningsAsErrors=false",
-              "/maxCpuCount:1",
-              "/nologo",
-              "/v:minimal"
-            )
-
-            if ($targetProjects.Count -gt 0) {
-              foreach ($proj in $targetProjects) {
-                $fullProj = Join-Path $root $proj
-                Write-Host "Compilando projeto: $fullProj"
-                & msbuild.exe $fullProj @msbArgs
-                if ($LASTEXITCODE -ne 0) { Write-Host "FALHOU: $proj"; $failed = $true }
-              }
-            } else {
-              & msbuild.exe $sln.FullName @msbArgs
-              if ($LASTEXITCODE -ne 0) { $failed = $true }
-            }
-          } else {
-            $cmake = Get-ChildItem -Path $root -Filter "CMakeLists.txt" -Recurse -Depth 5 | Select-Object -First 1
-            if (-not $cmake) {
-              Write-Error "Nenhum arquivo .sln ou CMakeLists.txt encontrado no repositorio."
-              exit 1
-            }
-            $srcDir = Split-Path $cmake.FullName
-            $buildDir = "$repo\build_win"
-            New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
-            cmake.exe -S "$srcDir" -B "$buildDir" -A x64 `
-              -DCMAKE_CXX_FLAGS="/I`"$boostInc`" /permissive /w" `
-              -DCMAKE_C_FLAGS="/I`"$boostInc`" /w"
-            cmake.exe --build "$buildDir" --config Release --parallel 1
-            if ($LASTEXITCODE -ne 0) { $failed = $true }
-          }
-
-          if ($failed) { exit 1 }
-
-      - name: Upload Built Windows Binaries
+      - name: Upload built binaries
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build-release
+          name: xdk-build-release
           path: |
             **/*.exe
             **/*.dll
-            !**/vcpkg/**
             !**/third_party/**
-          if-no-files-found: error
+          if-no-files-found: warn
