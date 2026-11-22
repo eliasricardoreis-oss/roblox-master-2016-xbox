@@ -1,693 +1,181 @@
-name: "Auto Build Windows & Web Gambiarra + Release"
+name: Build Windows EXE (2016 Source)
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ "**" ]
+    branches: [ main, master ]
   workflow_dispatch:
-    inputs:
-      build_configuration:
-        description: "Configuração"
-        required: true
-        type: choice
-        options: [ Release, Debug ]
-        default: Release
-      platform:
-        description: "Plataforma Windows da solution"
-        required: true
-        type: choice
-        options: [ x64, x86, ARM ]
-        default: x64
-      release_tag:
-        description: "Tag da GitHub Release"
-        required: true
-        default: "latest-build"
-      contribs_direct_url:
-        description: "Opcional: URL direta do Contribs.zip se o MediaFire bloquear"
-        required: false
-        default: ""
-
-# Por padrão só leitura; só o job de release recebe permissão de escrita.
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  BUILD_CONFIG: ${{ github.event.inputs.build_configuration || 'Release' }}
-  WIN_PLATFORM: ${{ github.event.inputs.platform || 'x64' }}
-  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'latest-build' }}
-  MEDIAFIRE_PAGE_URL: "https://www.mediafire.com/file/2srfgcurru99dfu/Contribs.zip/file?action=check"
-  # Ordem: input manual > variável do repositório (Settings > Variables) > vazio (usa MediaFire)
-  CONTRIBS_DIRECT_URL: ${{ github.event.inputs.contribs_direct_url || vars.CONTRIBS_DIRECT_URL || '' }}
 
 jobs:
-  build-windows-uwp:
-    name: Windows - XboxUWPClient
+  build-windows:
     runs-on: windows-latest
-    timeout-minutes: 90
 
     steps:
-      - name: Checkout repositório
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Configurar ambiente MSVC (VsDevCmd.bat)
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) {
-            Write-Error "vswhere.exe não encontrado."
-            exit 1
-          }
-          $installPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1
-          if (-not $installPath) {
-            Write-Error "Instalação do Visual Studio com MSBuild não encontrada."
-            exit 1
-          }
-          $devCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
-          if (-not (Test-Path $devCmd)) {
-            Write-Error "VsDevCmd.bat não encontrado em $devCmd"
-            exit 1
-          }
-          Write-Host "Visual Studio em: $installPath"
-
-          "VS_INSTALL_PATH=$installPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          $arch = switch ($env:WIN_PLATFORM) {
-            "x64"   { "amd64" }
-            "ARM"   { "arm" }
-            default { "x86" }
-          }
-
-          # Usa um .cmd temporário para evitar problemas de aspas ao chamar o cmd.exe
-          $bat = Join-Path $env:RUNNER_TEMP "vsenv.cmd"
-          Set-Content -Path $bat -Encoding ascii -Value @(
-            '@echo off',
-            "call `"$devCmd`" -no_logo -arch=$arch -host_arch=amd64 -startdir=none >nul 2>&1",
-            'set'
-          )
-          $envLines = cmd /c $bat
-
-          $currentPath = $env:PATH -split ';'
-          foreach ($line in $envLines) {
-            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
-            $name = $Matches[1]
-            $val  = $Matches[2]
-            if ($name -ieq "PATH") {
-              # GITHUB_PATH espera um diretório por linha
-              foreach ($p in ($val -split ';')) {
-                if ($p -and ($currentPath -notcontains $p)) {
-                  $p | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-                }
-              }
-            }
-            elseif ($name -notmatch '^(GITHUB_|RUNNER_|ACTIONS_)' -and
-                    [Environment]::GetEnvironmentVariable($name) -ne $val) {
-              "$name=$val" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            }
-          }
-
-      - name: Restaurar cache do Contribs
-        id: contribs-cache
-        uses: actions/cache/restore@v4
+      - name: Cache Boost Headers
+        uses: actions/cache@v4
         with:
-          path: third_party
-          key: contribs-v1
+          path: third_party/boost
+          key: win-boost-1.58.0-v2
 
-      - name: Baixar e extrair Contribs.zip (com retry)
-        if: steps.contribs-cache.outputs.cache-hit != 'true'
+      - name: Download & Extract Boost Headers (1.58.0)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path "third_party" -Force | Out-Null
-          $zipFile = Join-Path $env:RUNNER_TEMP "Contribs.zip"
-          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
-          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) { $sevenZip = "C:\Program Files\7-Zip\7z.exe" }
-
-          $downloadUrl = $env:CONTRIBS_DIRECT_URL
-          if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
-            Write-Host "Consultando página do MediaFire..."
-            $htmlFile = Join-Path $env:RUNNER_TEMP "mediafire_page.html"
-            curl.exe -L --fail --silent --show-error --retry 5 --retry-delay 3 -A $ua $env:MEDIAFIRE_PAGE_URL -o $htmlFile
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "Falha ao abrir a página do MediaFire (exit code $LASTEXITCODE). Informe contribs_direct_url no workflow_dispatch ou crie a variável de repositório CONTRIBS_DIRECT_URL."
-              exit 1
-            }
-            $html = Get-Content -Path $htmlFile -Raw -ErrorAction SilentlyContinue
-            if (-not $html) { $html = "" }
-            Remove-Item $htmlFile -Force -ErrorAction SilentlyContinue
-
-            $downloadUrl = $null
-
-            # O MediaFire às vezes entrega o link codificado em base64 no botão de download
-            $m = [regex]::Match($html, 'data-scrambled-url="([^"]+)"')
-            if ($m.Success) {
-              try {
-                $downloadUrl = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($m.Groups[1].Value))
-              } catch {
-                $downloadUrl = $null
-              }
-            }
-
-            if (-not $downloadUrl) {
-              $m = [regex]::Match($html, 'https?://download[0-9]+\.mediafire\.com/[^"''\s<>]+Contribs\.zip[^"''\s<>]*')
-              if (-not $m.Success) {
-                $m = [regex]::Match($html, 'https?://[^"''\s<>]*mediafire\.com/[^"''\s<>]*Contribs\.zip[^"''\s<>]*')
-              }
-              if ($m.Success) {
-                $downloadUrl = [System.Net.WebUtility]::HtmlDecode($m.Value)
-              }
-            }
-
-            if (-not $downloadUrl) {
-              Write-Error "Não foi possível extrair o link direto do MediaFire. Informe contribs_direct_url no workflow_dispatch ou crie a variável de repositório CONTRIBS_DIRECT_URL."
-              exit 1
-            }
-            Write-Host "Link direto do MediaFire encontrado."
+          if (-not (Test-Path "third_party/boost/boost/functional/hash.hpp")) {
+            Remove-Item -Recurse -Force "third_party/boost" -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path "third_party/boost" | Out-Null
+            curl.exe -sL "https://archives.boost.io/release/1.58.0/source/boost_1_58_0.tar.bz2" -o "boost.tar.bz2"
+            tar.exe -xjf "boost.tar.bz2" -C "third_party/boost" --strip-components=1 "boost_1_58_0/boost"
+            Remove-Item -Force "boost.tar.bz2"
           }
-
-          Write-Host "Baixando Contribs.zip no runner..."
-          $maxAttempts = 5
-          $ok = $false
-          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            Write-Host "Tentativa $attempt de $maxAttempts..."
-            Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-
-            curl.exe -L --fail --silent --show-error --retry 3 --retry-delay 5 --retry-connrefused `
-              -A $ua -H "Referer: https://www.mediafire.com/" $downloadUrl -o $zipFile
-
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zipFile)) {
-              Write-Warning "Falha no curl (exit code $LASTEXITCODE). Aguardando retentativa..."
-              Start-Sleep -Seconds 5
-              continue
-            }
-
-            $bytes = Get-Content -Path $zipFile -AsByteStream -TotalCount 2
-            $header = [System.Text.Encoding]::ASCII.GetString($bytes)
-            if ($header -ne "PK") {
-              Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-              Write-Error "O arquivo baixado não é um ZIP (provavelmente uma página HTML de bloqueio). Use contribs_direct_url com um link direto."
-              exit 1
-            }
-
-            $sizeMB = [math]::Round(((Get-Item $zipFile).Length / 1MB), 1)
-            Write-Host "Download concluído ($sizeMB MB). Testando integridade..."
-            & $sevenZip t $zipFile -y | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "ZIP íntegro!"
-              $ok = $true
-              break
-            }
-            Write-Warning "ZIP corrompido (exit code $LASTEXITCODE). Baixando de novo..."
-          }
-
-          if (-not $ok) {
-            Write-Error "Não foi possível baixar um Contribs.zip íntegro após $maxAttempts tentativas."
+          if (-not (Test-Path "third_party/boost/boost/functional/hash.hpp")) {
+            Write-Error "Boost nao foi extraido corretamente (hash.hpp ausente)."
             exit 1
           }
+          Write-Host "Boost OK: $((Get-Item 'third_party/boost/boost/functional/hash.hpp').FullName)"
 
-          Write-Host "Extraindo..."
-          & $sevenZip x $zipFile "-othird_party" -mmt=on -y -bso0 -bsp0
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Falha durante a extração com 7z (exit code $LASTEXITCODE)."
-            exit 1
-          }
-
-          Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-          Write-Host "Contribs extraído."
-
-      - name: Salvar cache do Contribs
-        if: steps.contribs-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+      - name: Setup Visual Studio Developer Environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          path: third_party
-          key: contribs-v1
+          arch: x64
 
-      - name: Preparar caminhos do Contribs (Boost, zlib e links na raiz do drive)
+      - name: Build Windows Project
         shell: pwsh
         run: |
-          $repoRoot = (Get-Location).Path
-          $driveRoot = [System.IO.Path]::GetPathRoot($repoRoot)
-          $thirdPartyFull = Join-Path $repoRoot "third_party"
+          $ErrorActionPreference = "Continue"
+          $repo = (Get-Location).Path
+          $boostInc = "$repo\third_party\boost"
 
-          $includeDirs = @()
-          $libDirs = @()
+          # Detecta a raiz real do projeto (pode haver pasta aninhada)
+          $root = $repo
+          $nested = Get-ChildItem -Path $repo -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
+          if (-not (Test-Path (Join-Path $repo "App")) -and $nested) { $root = $nested.FullName }
+          Write-Host "Raiz do projeto: $root"
 
-          $boostDir = Get-ChildItem -Path $thirdPartyFull -Filter "boost_1_56_0" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($boostDir) {
-            Write-Host "Boost encontrado em: $($boostDir.FullName)"
-            $includeDirs += $boostDir.FullName
-            $boostLib = Join-Path $boostDir.FullName "stage\lib"
-            if (Test-Path $boostLib) { $libDirs += $boostLib }
-
-            $rootBoostLink = Join-Path $driveRoot "boost_1_56_0"
-            if (-not (Test-Path $rootBoostLink)) {
-              New-Item -ItemType Junction -Path $rootBoostLink -Value $boostDir.FullName -ErrorAction SilentlyContinue | Out-Null
+          # Headers ATL/MFC dentro do MSVC (corrige 'atlbase.h')
+          $atlInc = @()
+          if ($env:VCToolsInstallDir) {
+            Get-ChildItem -Path $env:VCToolsInstallDir -Filter "atlbase.h" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+              $dir = Split-Path $_.FullName
+              if ($dir -notin $atlInc) { $atlInc += $dir }
             }
           }
 
-          # Procura zlib.h
-          $zlibHeaders = Get-ChildItem -Path $thirdPartyFull -Filter "zlib.h" -Recurse -File -ErrorAction SilentlyContinue
-          foreach ($zh in $zlibHeaders) {
-            $dir = $zh.DirectoryName
-            if ($includeDirs -notcontains $dir) {
-              Write-Host "Header zlib.h encontrado em: $dir"
-              $includeDirs += $dir
-            }
+          $extraInc = @($boostInc, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") + $atlInc
+          $extraInc = $extraInc | Where-Object { Test-Path $_ }
+
+          # INCLUDE sozinho e ignorado pelo MSBuild; a variavel CL e lida diretamente pelo cl.exe
+          $env:INCLUDE = (($extraInc -join ";") + ";" + $env:INCLUDE)
+          $env:CL = (($extraInc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /permissive- /FS /MP1"
+          Write-Host "CL=$env:CL"
+
+          # PlatformToolset e Windows SDK
+          $toolset = "v143"
+          if ($env:VCToolsVersion) {
+            $major = [int]($env:VCToolsVersion.Split('.')[0])
+            $minor = [int]($env:VCToolsVersion.Split('.')[1])
+            if ($major -ge 15 -or $minor -ge 50) { $toolset = "v145" }
+            else { $toolset = "v143" }
           }
 
-          # Subpastas comuns de include/lib em third_party + junction na raiz do drive
-          Get-ChildItem -Path $thirdPartyFull -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $sub = $_.FullName
-            if ($includeDirs -notcontains $sub) { $includeDirs += $sub }
-            $incSub = Join-Path $sub "include"
-            if ((Test-Path $incSub) -and ($includeDirs -notcontains $incSub)) { $includeDirs += $incSub }
-            $libSub = Join-Path $sub "lib"
-            if ((Test-Path $libSub) -and ($libDirs -notcontains $libSub)) { $libDirs += $libSub }
-
-            $rootLink = Join-Path $driveRoot $_.Name
-            if (-not (Test-Path $rootLink)) {
-              New-Item -ItemType Junction -Path $rootLink -Value $sub -ErrorAction SilentlyContinue | Out-Null
-            }
-          }
-
-          $incJoined = ($includeDirs -join ";")
-          $libJoined = ($libDirs -join ";")
-          Write-Host "IncludeDirs extras: $incJoined"
-          Write-Host "LibDirs extras: $libJoined"
-
-          # Passar /p:IncludePath=... na linha de comando SUBSTITUI os caminhos padrão do MSVC
-          # (e o $(IncludePath) vira texto literal). Por isso as pastas extras entram por um
-          # arquivo .targets importado no fim de cada projeto, que apenas ACRESCENTA diretórios.
-          $propsPath = Join-Path $env:RUNNER_TEMP "ci_extra.targets"
-          $incXml = [System.Security.SecurityElement]::Escape($incJoined)
-          $libXml = [System.Security.SecurityElement]::Escape($libJoined)
-          @"
-          <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-            <ItemDefinitionGroup>
-              <ClCompile>
-                <AdditionalIncludeDirectories>$incXml;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-              </ClCompile>
-              <ResourceCompile>
-                <AdditionalIncludeDirectories>$incXml;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-              </ResourceCompile>
-              <Link>
-                <AdditionalLibraryDirectories>$libXml;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-              </Link>
-              <Lib>
-                <AdditionalLibraryDirectories>$libXml;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-              </Lib>
-            </ItemDefinitionGroup>
-          </Project>
-          "@ | Set-Content -Path $propsPath -Encoding utf8
-
-          "EXTRA_PROPS_FILE=$propsPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Detectar Toolset e SDK instalados e ajustar .vcxproj
-        shell: pwsh
-        run: |
-          # ---- Toolset: procura os realmente instalados (não assume versão do VS) ----
-          $vcRoot = Join-Path $env:VS_INSTALL_PATH "MSBuild\Microsoft\VC"
-          $installedToolsets = @()
-          if (Test-Path $vcRoot) {
-            $installedToolsets = @(
-              Get-ChildItem -Path $vcRoot -Filter "Toolset.props" -Recurse -File -ErrorAction SilentlyContinue |
-                ForEach-Object { Split-Path -Leaf (Split-Path -Parent $_.FullName) } |
-                Where-Object { $_ -match '^v\d+$' } |
-                Sort-Object -Unique
-            )
-          }
-          Write-Host "Toolsets instalados: $($installedToolsets -join ', ')"
-
-          if ($installedToolsets.Count -gt 0) {
-            $targetToolset = $installedToolsets | Sort-Object { [int]($_ -replace '^v', '') } -Descending | Select-Object -First 1
-          } else {
-            $targetToolset = "v143"
-          }
-
-          # ---- Windows SDK: prefere 26100, senão usa o mais novo instalado ----
-          $kitsInclude = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include"
-          $sdks = @(
-            Get-ChildItem -Path $kitsInclude -Directory -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match '^10\.0\.\d+\.\d+$' } |
+          $winSdkRoot = "C:\Program Files (x86)\Windows Kits\10\Include"
+          $sdkVer = "10.0.22621.0"
+          if (Test-Path $winSdkRoot) {
+            $latestSdk = Get-ChildItem -Path $winSdkRoot -Directory |
+              Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
               Sort-Object { [version]$_.Name } -Descending |
-              ForEach-Object { $_.Name }
-          )
-          Write-Host "Windows SDKs instalados: $($sdks -join ', ')"
-          if ($sdks -contains "10.0.26100.0") {
-            $targetSdk = "10.0.26100.0"
-          } elseif ($sdks.Count -gt 0) {
-            $targetSdk = $sdks[0]
+              Select-Object -First 1
+            if ($latestSdk) { $sdkVer = $latestSdk.Name }
+          }
+
+          $allSlns = Get-ChildItem -Path $root -Filter "*.sln" -Recurse -Depth 5
+          $sln = $allSlns | Where-Object { $_.Name -notmatch "CSharp" -and $_.Name -match "Client" } | Select-Object -First 1
+          if (-not $sln) { $sln = $allSlns | Select-Object -First 1 }
+
+          $failed = $false
+
+          if ($sln) {
+            Write-Host "Compilando Solution: $($sln.FullName)"
+            $slnContent = Get-Content -Path $sln.FullName -Raw
+            $configs = [regex]::Matches($slnContent, '^\s*(Debug|Release)\|([^=\r\n]+)\s*=', 'Multiline') |
+              ForEach-Object { "$($_.Groups[1].Value)|$($_.Groups[2].Value.Trim())" } |
+              Select-Object -Unique
+
+            $chosen = $configs | Where-Object { $_ -match "^Release\|(Win32|x64|x86)$" } | Select-Object -First 1
+            if (-not $chosen) { $chosen = $configs | Where-Object { $_ -match "^Release\|" } | Select-Object -First 1 }
+            if (-not $chosen) { $chosen = $configs | Select-Object -First 1 }
+
+            $cfg = "Release"
+            $plat = "Win32"
+            if ($chosen) {
+              $parts = $chosen.Split('|', 2)
+              $cfg = $parts[0]
+              $plat = $parts[1]
+            }
+
+            Write-Host "Usando Configuration='$cfg', Platform='$plat', Toolset='$toolset', SDK='$sdkVer'"
+
+            $targetProjects = @(
+              "WindowsClient\WindowsClient.vcxproj",
+              "RobloxStudio\RobloxStudio.vcxproj",
+              "App\App.vcxproj",
+              "Network\Network.vcxproj"
+            ) | Where-Object { Test-Path (Join-Path $root $_) }
+
+            $msbArgs = @(
+              "/p:Configuration=$cfg",
+              "/p:Platform=$plat",
+              "/p:PlatformToolset=$toolset",
+              "/p:WindowsTargetPlatformVersion=$sdkVer",
+              "/p:PostBuildEventUseInBuild=false",
+              "/p:PreBuildEventUseInBuild=false",
+              "/p:WarningLevel=0",
+              "/p:TreatWarningsAsErrors=false",
+              "/maxCpuCount:1",
+              "/nologo",
+              "/v:minimal"
+            )
+
+            if ($targetProjects.Count -gt 0) {
+              foreach ($proj in $targetProjects) {
+                $fullProj = Join-Path $root $proj
+                Write-Host "Compilando projeto: $fullProj"
+                & msbuild.exe $fullProj @msbArgs
+                if ($LASTEXITCODE -ne 0) { Write-Host "FALHOU: $proj"; $failed = $true }
+              }
+            } else {
+              & msbuild.exe $sln.FullName @msbArgs
+              if ($LASTEXITCODE -ne 0) { $failed = $true }
+            }
           } else {
-            $targetSdk = "10.0.26100.0"
-          }
-
-          Write-Host "Usando PlatformToolset: $targetToolset | Windows SDK: $targetSdk"
-          "RESOLVED_TOOLSET=$targetToolset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "RESOLVED_SDK=$targetSdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          # ---- Ajusta os .vcxproj do repositório ----
-          Get-ChildItem -Path . -Filter "*.vcxproj" -Recurse |
-            Where-Object { $_.FullName -notmatch '\\third_party\\' } |
-            ForEach-Object {
-              $path = $_.FullName
-              $original = Get-Content -Path $path -Raw
-              $content = $original
-
-              # 1) Remove a extensão WindowsMobile (não existe nos SDKs novos).
-              #    Precisa vir ANTES de trocar a versão do SDK.
-              $content = [regex]::Replace($content, '(?s)<SDKReference\s+Include="WindowsMobile[^"]*"\s*/>', '')
-              $content = [regex]::Replace($content, '(?s)<SDKReference\s+Include="WindowsMobile[^"]*"\s*>.*?</SDKReference>', '')
-              $content = [regex]::Replace($content, '(?s)<SDKExtensionReference[^>]*WindowsMobile[^>]*/>', '')
-
-              # 2) Versões antigas do SDK -> SDK instalado
-              $content = $content -replace '10\.0\.14393\.0', $targetSdk
-              $content = $content -replace '10\.0\.10240\.0', $targetSdk
-
-              # 3) Toolsets antigos -> toolset instalado
-              $content = [regex]::Replace($content, '(<PlatformToolset[^>]*>)v1\d\d(</PlatformToolset>)', "`${1}$targetToolset`${2}")
-
-              if ($content -ne $original) {
-                Write-Host "Ajustado: $($_.Name)"
-                Set-Content -Path $path -Value $content -NoNewline -Encoding utf8
-              }
+            $cmake = Get-ChildItem -Path $root -Filter "CMakeLists.txt" -Recurse -Depth 5 | Select-Object -First 1
+            if (-not $cmake) {
+              Write-Error "Nenhum arquivo .sln ou CMakeLists.txt encontrado no repositorio."
+              exit 1
             }
-
-      - name: Aplicar patches no código (UWP)
-        shell: pwsh
-        run: |
-          # RakNet: bitstream.h usa ntohs/htons sem incluir winsock2.h no build UWP (erro C3861)
-          $files = Get-ChildItem -Path . -Recurse -Filter "bitstream.h" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\raknet\\' -and $_.FullName -notmatch '\\third_party\\' }
-
-          foreach ($f in $files) {
-            $c = Get-Content -Path $f.FullName -Raw
-            if ($c -match 'CI_PATCH_WINSOCK') {
-              Write-Host "Já com patch: $($f.FullName)"
-              continue
-            }
-            $patch = "// CI_PATCH_WINSOCK`r`n#if defined(_WIN32)`r`n#include <winsock2.h>`r`n#endif`r`n"
-            Set-Content -Path $f.FullName -Value ($patch + $c) -NoNewline -Encoding utf8
-            Write-Host "Patch aplicado: $($f.FullName)"
-          }
-          if (-not $files) { Write-Warning "bitstream.h do RakNet não encontrado." }
-
-      - name: Compilar XboxUWPClient.sln
-        shell: pwsh
-        run: |
-          $sln = Get-ChildItem -Path . -Filter "XboxUWPClient.sln" -Recurse -File | Select-Object -First 1
-          if (-not $sln) {
-            Write-Error "XboxUWPClient.sln não encontrado."
-            exit 1
-          }
-          # Usa o MSBuild do próprio Visual Studio detectado (o "msbuild" do PATH pode ser
-          # uma versão antiga que não conhece o switch -restore).
-          $msbuild = $null
-          $candidates = @(
-            (Join-Path $env:VS_INSTALL_PATH "MSBuild\Current\Bin\amd64\MSBuild.exe"),
-            (Join-Path $env:VS_INSTALL_PATH "MSBuild\Current\Bin\MSBuild.exe")
-          )
-          foreach ($c in $candidates) {
-            if (Test-Path $c) { $msbuild = $c; break }
-          }
-          if (-not $msbuild) {
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
-          }
-          if (-not $msbuild) {
-            Write-Error "MSBuild.exe não encontrado."
-            exit 1
-          }
-          Write-Host "Usando MSBuild: $msbuild"
-          & $msbuild -nologo -version
-
-          $toolset = if ($env:RESOLVED_TOOLSET) { $env:RESOLVED_TOOLSET } else { "v143" }
-          $sdk     = if ($env:RESOLVED_SDK)     { $env:RESOLVED_SDK }     else { "10.0.26100.0" }
-
-          Write-Host "Compilando $($sln.FullName) [$($env:BUILD_CONFIG)|$($env:WIN_PLATFORM)] com SDK $sdk e Toolset $toolset"
-
-          $logDir = Join-Path $env:GITHUB_WORKSPACE "build_logs"
-          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-
-          $msbuildArgs = @(
-            $sln.FullName,
-            "-restore",
-            "/p:RestorePackagesConfig=true",
-            "/p:Configuration=$($env:BUILD_CONFIG)",
-            "/p:Platform=$($env:WIN_PLATFORM)",
-            "/p:PlatformToolset=$toolset",
-            "/p:WindowsTargetPlatformVersion=$sdk",
-            "/p:WindowsTargetPlatformMinVersion=$sdk",
-            "/p:AppxBundle=Never",
-            "/p:AppxPackageSigningEnabled=false",
-            "/m",
-            "/nologo",
-            "/nodeReuse:false",
-            # Console: só erros (os milhares de avisos C4267 escondiam o erro real)
-            "/clp:ErrorsOnly;Summary",
-            # Arquivos de log completos, enviados como artefato no fim do job
-            "/flp1:logfile=$logDir\msbuild_errors.log;errorsonly;encoding=utf-8",
-            "/flp2:logfile=$logDir\msbuild_full.log;verbosity=minimal;encoding=utf-8"
-          )
-          if ($env:EXTRA_PROPS_FILE -and (Test-Path $env:EXTRA_PROPS_FILE)) {
-            $msbuildArgs += "/p:CustomAfterMicrosoftCommonTargets=$($env:EXTRA_PROPS_FILE)"
+            $srcDir = Split-Path $cmake.FullName
+            $buildDir = "$repo\build_win"
+            New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+            cmake.exe -S "$srcDir" -B "$buildDir" -A x64 `
+              -DCMAKE_CXX_FLAGS="/I`"$boostInc`" /permissive /w" `
+              -DCMAKE_C_FLAGS="/I`"$boostInc`" /w"
+            cmake.exe --build "$buildDir" --config Release --parallel 1
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
           }
 
-          & $msbuild @msbuildArgs
-          if ($LASTEXITCODE -ne 0) {
-            $code = $LASTEXITCODE
-            Write-Host "=== ÚLTIMOS ERROS DO MSBUILD ==="
-            $errLog = Join-Path $logDir "msbuild_errors.log"
-            if (Test-Path $errLog) { Get-Content $errLog -Tail 100 }
-            Write-Error "MSBuild falhou (exit code $code)."
-            exit $code
-          }
+          if ($failed) { exit 1 }
 
-      - name: Upload logs do MSBuild
-        if: always()
+      - name: Upload Built Windows Binaries
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: msbuild-logs
-          path: build_logs/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Empacotar artefato Windows (.zip)
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path "release_assets" -Force | Out-Null
-          $root = (Get-Location).Path
-          $winOut = Join-Path $root "release_assets\windows-uwp-$($env:WIN_PLATFORM)-$($env:BUILD_CONFIG).zip"
-
-          $exts = @(".exe", ".dll", ".lib", ".appx", ".appxbundle", ".msix", ".msixbundle")
-          $files = @(
-            Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object {
-                ($exts -contains $_.Extension.ToLower()) -and
-                ($_.FullName -notmatch '\\(third_party|release_assets|\.git|node_modules)\\')
-              }
-          )
-
-          if ($files.Count -gt 0) {
-            # Copia mantendo a estrutura de pastas (evita erro de nomes duplicados no zip)
-            $stage = Join-Path $env:RUNNER_TEMP "win_stage"
-            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Path $stage -Force | Out-Null
-            foreach ($f in $files) {
-              $rel = $f.FullName.Substring($root.Length).TrimStart('\')
-              $dest = Join-Path $stage $rel
-              New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null
-              Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
-            }
-            Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $winOut -Force
-            Write-Host "Gerado: $winOut ($($files.Count) arquivos)"
-          } else {
-            "Nenhum binário gerado pelo MSBuild." | Out-File (Join-Path $root "release_assets\windows-build-info.txt")
-          }
-
-      - name: Upload artefato Windows
-        uses: actions/upload-artifact@v4
-        with:
-          name: win-release-assets
-          path: release_assets/
+          name: windows-build-release
+          path: |
+            **/*.exe
+            **/*.dll
+            !**/vcpkg/**
+            !**/third_party/**
           if-no-files-found: error
-
-  build-web-gambiarra:
-    name: Web - Gambiarra (WASM Bridge + HTML5)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout repositório
-        uses: actions/checkout@v4
-
-      - name: Instalar Emscripten SDK
-        uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: "3.1.74"
-          actions-cache-folder: "emsdk-cache"
-
-      - name: Gerar módulo WASM + runner HTML5 (gambiarra) e empacotar .zip
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p web_out release_assets
-
-          cat << 'EOF' > web_out/gambiarra_bridge.cpp
-          #include <emscripten/emscripten.h>
-
-          extern "C" {
-            EMSCRIPTEN_KEEPALIVE
-            const char* get_client_info() {
-              return "XboxUWPClient Web Gambiarra Bridge (WASM)";
-            }
-
-            EMSCRIPTEN_KEEPALIVE
-            int ping_bridge(int v) {
-              return v + 1;
-            }
-          }
-          EOF
-
-          emcc web_out/gambiarra_bridge.cpp \
-            -O2 \
-            -s WASM=1 \
-            -s EXPORTED_FUNCTIONS='["_get_client_info","_ping_bridge"]' \
-            -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
-            -o web_out/gambiarra_bridge.js
-
-          cat << 'EOF' > web_out/index.html
-          <!doctype html>
-          <html lang="pt-BR">
-          <head>
-            <meta charset="utf-8" />
-            <title>XboxUWPClient - Web Gambiarra</title>
-            <style>
-              body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
-              canvas { display: block; width: 100%; max-width: 960px; height: 540px; background: #1d1f27; border: 1px solid #333; margin-top: 12px; }
-              .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-              input, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; }
-              button { cursor: pointer; background: #2b6cb0; border-color: #2b6cb0; }
-            </style>
-          </head>
-          <body>
-            <h2>XboxUWPClient — Web Gambiarra Runner</h2>
-            <p>Abra por um servidor HTTP (ex.: <code>python -m http.server</code>); o WASM não carrega via file://.</p>
-            <div class="bar">
-              <input id="wsUrl" type="text" value="ws://localhost:8080" size="28" />
-              <button id="btnConnect">Conectar Stream/Bridge</button>
-              <button id="btnPing">Testar WASM</button>
-              <span id="status">Aguardando...</span>
-            </div>
-            <canvas id="screen" width="1280" height="720"></canvas>
-
-            <script>
-              // Define o Module ANTES de carregar o JS do Emscripten
-              var Module = {
-                onRuntimeInitialized: function () {
-                  var info = Module.ccall("get_client_info", "string", [], []);
-                  document.getElementById("status").textContent = info;
-                }
-              };
-            </script>
-            <script src="gambiarra_bridge.js"></script>
-            <script>
-              const statusEl = document.getElementById("status");
-              const canvas = document.getElementById("screen");
-              const ctx = canvas.getContext("2d");
-              let ws = null;
-
-              function drawPlaceholder(msg) {
-                ctx.fillStyle = "#1d1f27";
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = "#9ca3af";
-                ctx.font = "20px sans-serif";
-                ctx.fillText(msg, 32, 64);
-              }
-
-              drawPlaceholder("WASM carregado. Conecte a um host/bridge ou use como frontend web.");
-
-              document.getElementById("btnPing").onclick = () => {
-                const res = Module.ccall("ping_bridge", "number", ["number"], [41]);
-                statusEl.textContent = "WASM ping -> " + res;
-              };
-
-              document.getElementById("btnConnect").onclick = () => {
-                const url = document.getElementById("wsUrl").value.trim();
-                if (ws) ws.close();
-                ws = new WebSocket(url);
-                ws.binaryType = "arraybuffer";
-                ws.onopen = () => statusEl.textContent = "Conectado em " + url;
-                ws.onclose = () => statusEl.textContent = "Desconectado";
-                ws.onerror = () => statusEl.textContent = "Erro de conexão WS";
-                ws.onmessage = async (ev) => {
-                  if (ev.data instanceof ArrayBuffer) {
-                    const blob = new Blob([ev.data], { type: "image/jpeg" });
-                    const bmp = await createImageBitmap(blob);
-                    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-                  }
-                };
-              };
-            </script>
-          </body>
-          </html>
-          EOF
-
-          rm -f web_out/gambiarra_bridge.cpp
-          ls -lh web_out
-          zip -r "release_assets/web-gambiarra-${BUILD_CONFIG}.zip" web_out/
-
-      - name: Upload artefato Web
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-release-assets
-          path: release_assets/
-          if-no-files-found: error
-
-  release:
-    name: Publicar GitHub Release
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [ build-windows-uwp, build-web-gambiarra ]
-    # Só publica em push na branch padrão ou execução manual (nunca em PR).
-    # O build web basta; se o Windows falhar, a release sai só com o zip web.
-    if: ${{ !cancelled() && needs.build-web-gambiarra.result == 'success' && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch) }}
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout repositório
-        uses: actions/checkout@v4
-
-      - name: Baixar artefatos
-        uses: actions/download-artifact@v4
-        with:
-          pattern: "*-release-assets"
-          path: release_assets
-          merge-multiple: true
-
-      - name: Listar arquivos da release
-        shell: bash
-        run: ls -lh release_assets
-
-      - name: Mover a tag para este commit
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
-          git push -f origin "refs/tags/$RELEASE_TAG"
-
-      - name: Publicar tudo no GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: "Build ${{ env.RELEASE_TAG }} (${{ env.BUILD_CONFIG }})"
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-          files: release_assets/*
