@@ -3,8 +3,16 @@ name: XboxWinClient (port Xbox -> Windows, experimental)
 on:
   workflow_dispatch:
     inputs:
-      contribs_url:
-        description: "URL direta do Contribs.zip (opcional se houver pasta Contribs no repo)"
+      contribs_repo:
+        description: "Repo git com a pasta Contribs"
+        required: false
+        default: "https://github.com/SANS3R66/roblox-2016-source-code.git"
+      contribs_subdir:
+        description: "Subpasta do Contribs dentro do repo"
+        required: false
+        default: "Contribs"
+      contribs_ref:
+        description: "Branch/tag (vazio = branch padrao)"
         required: false
         default: ""
       project_file:
@@ -33,7 +41,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 300
     env:
-      CONTRIBS_URL: ${{ inputs.contribs_url }}
+      CONTRIBS_REPO: ${{ inputs.contribs_repo }}
+      CONTRIBS_SUBDIR: ${{ inputs.contribs_subdir }}
+      CONTRIBS_REF: ${{ inputs.contribs_ref }}
       PROJECT_FILE: ${{ inputs.project_file }}
       TOOLSET_IN: ${{ inputs.toolset }}
       MAX_ROUNDS: ${{ inputs.max_rounds }}
@@ -42,43 +52,56 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ---------- Contribs / Boost ----------
-      - name: Prepare Contribs (CONTRIB_PATH)
+      # ---------- Contribs via git (clone parcial) + Boost ----------
+      - name: Prepare Contribs (git sparse clone)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
           $ws = (Get-Location).Path
+          $dir = "D:\contribs_repo"
           $contrib = $null
-          $local = Get-ChildItem -Path $ws -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
-          if ($local) { $contrib = $local.FullName }
+          Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 
-          if (-not $contrib -and $env:CONTRIBS_URL) {
-            New-Item -ItemType Directory -Force -Path "D:\contribs_ext" | Out-Null
-            curl.exe -L --fail --retry 3 -o "D:\contribs.zip" "$env:CONTRIBS_URL"
-            if ($LASTEXITCODE -ne 0) { Write-Error "Falha ao baixar Contribs.zip"; exit 1 }
-            7z x "D:\contribs.zip" "-oD:\contribs_ext" -y | Select-Object -Last 3
-            Remove-Item -Force "D:\contribs.zip"
-            $contrib = "D:\contribs_ext"
-            $inner = Get-ChildItem $contrib -Directory | Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
-            if ($inner) { $contrib = $inner.FullName }
+          if ($env:CONTRIBS_REPO) {
+            for ($i = 1; $i -le 3 -and -not $contrib; $i++) {
+              Write-Host "git clone parcial de $env:CONTRIBS_REPO (tentativa $i)..."
+              $a = @("clone","--depth","1","--filter=blob:none","--sparse")
+              if ($env:CONTRIBS_REF) { $a += @("--branch",$env:CONTRIBS_REF) }
+              $a += @($env:CONTRIBS_REPO, $dir)
+              git @a
+              if ($LASTEXITCODE -eq 0) {
+                git -C $dir sparse-checkout set $env:CONTRIBS_SUBDIR
+                if ($LASTEXITCODE -eq 0 -and (Test-Path "$dir\$env:CONTRIBS_SUBDIR")) { $contrib = "$dir\$env:CONTRIBS_SUBDIR" }
+              }
+              if (-not $contrib) { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5 }
+            }
           }
 
-          if (-not $contrib) {
-            Write-Host "Sem Contribs: usando so Boost 1.56.0"
-            New-Item -ItemType Directory -Force -Path "$ws\third_party\boost" | Out-Null
-            curl.exe -sL --fail "https://archives.boost.io/release/1.56.0/source/boost_1_56_0.tar.bz2" -o "boost.tar.bz2"
-            tar.exe -xjf "boost.tar.bz2" -C "third_party/boost" --strip-components=1 "boost_1_56_0/boost"
-            Remove-Item -Force "boost.tar.bz2"
-            $contrib = "$ws\third_party"
+          if ($contrib) {
+            Write-Host "Contribs clonado em: $contrib"
+            Write-Host "Subpastas do Contribs:"
+            Get-ChildItem $contrib -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+            $size = (Get-ChildItem $contrib -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            Write-Host ("Tamanho: {0:N0} MB" -f ($size / 1MB))
+          } else {
+            Write-Host "::warning::Nao consegui clonar o Contribs; usando so a pasta boost do repo"
+            $contrib = $ws
           }
 
-          $ver = Get-ChildItem -Path $contrib -Filter "version.hpp" -Recurse -Depth 6 -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\boost\\version\.hpp$' } | Select-Object -First 1
-          if (-not $ver) { Write-Error "boost\version.hpp nao encontrado em $contrib"; exit 1 }
-          $boostRoot = Split-Path (Split-Path $ver.FullName)
+          # procura boost\version.hpp: primeiro no Contribs, depois na pasta boost do repo
+          $search = @($contrib)
+          if (Test-Path "$ws\boost") { $search += "$ws\boost" }
+          $boostRoot = $null
+          foreach ($s in $search) {
+            $ver = Get-ChildItem -Path $s -Filter "version.hpp" -Recurse -Depth 6 -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\boost\\version\.hpp$' } | Select-Object -First 1
+            if ($ver) { $boostRoot = Split-Path (Split-Path $ver.FullName); Get-Content $ver.FullName | Select-String 'define BOOST_LIB_VERSION' | ForEach-Object { Write-Host $_.Line }; break }
+          }
+          if (-not $boostRoot) { Write-Error "boost\version.hpp nao encontrado (nem no Contribs, nem na pasta boost)"; exit 1 }
+
           Write-Host "CONTRIB_PATH=$contrib | BOOST_ROOT=$boostRoot"
           "CONTRIB_PATH=$contrib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "BOOST_ROOT=$boostRoot"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BOOST_ROOT=$boostRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # ---------- Toolset (v140 se possivel: Boost antigo nao conhece MSVC novo) ----------
       - name: Install VS 2015 toolset (v140)
@@ -120,7 +143,8 @@ jobs:
           $ws  = (Get-Location).Path
           $dst = "$ws\XboxWinClient"
           Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
-          robocopy $ws $dst /E /XD .git XboxWinClient contribs_ext third_party logs node_modules `
+          # a pasta boost da raiz NAO e copiada (o Contribs ja fica fora do workspace em D:\)
+          robocopy $ws $dst /E /XD "$ws\.git" "$ws\XboxWinClient" "$ws\boost" "$ws\logs" node_modules `
             /XF *.exe *.dll *.lib *.pdb *.obj *.zip /NFL /NDL /NJH /NJS /NP | Out-Null
           $global:LASTEXITCODE = 0
 
@@ -173,8 +197,8 @@ jobs:
           $m = 0
           foreach ($f in $src) {
             $t = [IO.File]::ReadAllText($f.FullName); $o = $t
-            $t = $t -replace '(#\s*include\s*[<"])d3d11_x\.h([>"])',  '${1}d3d11_1.h${2}'
-            $t = $t -replace '(#\s*include\s*[<"])d3d12_x\.h([>"])',  '${1}d3d12.h${2}'
+            $t = $t -replace '(#\s*include\s*[<"])d3d11_x\.h([>"])',   '${1}d3d11_1.h${2}'
+            $t = $t -replace '(#\s*include\s*[<"])d3d12_x\.h([>"])',   '${1}d3d12.h${2}'
             $t = $t -replace '(#\s*include\s*[<"])xaudio2_x\.h([>"])', '${1}xaudio2.h${2}'
             if ($t -ne $o) { [IO.File]::WriteAllText($f.FullName, $t); $m++ }
           }
@@ -198,7 +222,6 @@ jobs:
           }
           Write-Host "Projeto: $($projFile.FullName)"
 
-          # mapeamento de headers conhecidos
           $map = @{
             "d3d11_x.h"   = "#include <d3d11_1.h>"
             "d3d12_x.h"   = "#include <d3d12.h>"
@@ -212,7 +235,7 @@ jobs:
           $nested = Get-ChildItem $dst -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
           if (-not (Test-Path (Join-Path $dst "App")) -and $nested) { $root = $nested.FullName }
 
-          $inc = @($shim, $env:BOOST_ROOT, $env:CONTRIB_PATH, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") |
+          $inc = @($shim, $env:BOOST_ROOT, $env:CONTRIB_PATH, $ws, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") |
             Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
           $env:INCLUDE = (($inc -join ";") + ";" + $env:INCLUDE)
           $env:CL  = (($inc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /FI`"$shim\xbox_win_shim.h`" /DBOOST_USE_WINDOWS_H /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS /FS"
@@ -243,7 +266,7 @@ jobs:
               ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value -replace '\\','/' } | Sort-Object -Unique
             $new = 0
             foreach ($mh in $missing) {
-              if ($mh -match '^boost/') { continue }
+              if ($mh -match '^boost/') { Write-Host "  (boost nao achado: $mh - verifique o Contribs/boost)"; continue }
               $stub = Join-Path $shim ($mh -replace '/','\')
               if (Test-Path $stub) { continue }
               New-Item -ItemType Directory -Force -Path (Split-Path $stub) | Out-Null
