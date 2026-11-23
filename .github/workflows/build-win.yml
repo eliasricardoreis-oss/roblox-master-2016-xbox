@@ -164,6 +164,9 @@ jobs:
           #ifndef XBOX_WIN_PORT
           #define XBOX_WIN_PORT 1
           #endif
+          #ifndef _WINSOCKAPI_
+          #define _WINSOCKAPI_
+          #endif
           #ifdef __cplusplus
           #ifndef WIN32_LEAN_AND_MEAN
           #define WIN32_LEAN_AND_MEAN
@@ -242,6 +245,11 @@ jobs:
             "pix.h"       = ""
           }
 
+          # headers do boost que faltam no Contribs e podem ser substituidos por stubs minimos
+          $boostStubs = @{
+            "boost/preprocessor/debug/error.hpp" = "#include <boost/preprocessor/cat.hpp>`n#define BOOST_PP_ERROR(code) BOOST_PP_CAT(BOOST_PP_ERROR_, code)"
+          }
+
           $root = $dst
           $nested = Get-ChildItem $dst -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
           if (-not (Test-Path (Join-Path $dst "App")) -and $nested) { $root = $nested.FullName }
@@ -278,7 +286,7 @@ jobs:
               ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value -replace '\\','/' } | Sort-Object -Unique
             $new = 0
             foreach ($mh in $missing) {
-              if ($mh -match '^boost/') { Write-Host "  (boost nao achado: $mh - verifique o Contribs/boost)"; continue }
+              if ($mh -match '^boost/' -and -not $boostStubs.ContainsKey($mh)) { Write-Host "  (boost nao achado: $mh - verifique o Contribs/boost)"; continue }
               # nunca criar stub fora da pasta _shims
               if ($mh -match '(^|/)\.\.(/|$)' -or [IO.Path]::IsPathRooted($mh)) { Write-Host "  (ignorado: $mh)"; continue }
               $stub = Join-Path $shim ($mh -replace '/','\')
@@ -286,7 +294,8 @@ jobs:
               New-Item -ItemType Directory -Force -Path (Split-Path $stub) | Out-Null
               $leaf = Split-Path $mh -Leaf
               $body = "#pragma once"
-              if ($map.ContainsKey($leaf)) { $body += "`n" + $map[$leaf] }
+              if ($boostStubs.ContainsKey($mh)) { $body += "`n" + $boostStubs[$mh] }
+              elseif ($map.ContainsKey($leaf)) { $body += "`n" + $map[$leaf] }
               Set-Content -Path $stub -Value $body -Encoding ascii
               Write-Host "  stub criado: $mh"
               $new++
