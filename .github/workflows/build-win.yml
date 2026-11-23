@@ -84,7 +84,7 @@ jobs:
             $size = (Get-ChildItem $contrib -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
             Write-Host ("Tamanho: {0:N0} MB" -f ($size / 1MB))
           } else {
-            Write-Host "::warning::Nao consegui clonar o Contribs; usando so a pasta boost do repo"
+            Write-Host "::warning::Nao consegui clonar o Contribs, usando so a pasta boost do repo"
             $contrib = $ws
           }
 
@@ -103,6 +103,9 @@ jobs:
           "CONTRIB_PATH=$contrib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "BOOST_ROOT=$boostRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          # um git que falhou numa tentativa (mas teve sucesso depois) nao pode derrubar o step
+          $global:LASTEXITCODE = 0
+
       # ---------- Toolset (v140 se possivel: Boost antigo nao conhece MSVC novo) ----------
       - name: Install VS 2015 toolset (v140)
         if: ${{ inputs.toolset == 'auto' }}
@@ -117,6 +120,7 @@ jobs:
             "--add","Microsoft.VisualStudio.Component.VC.140",
             "--quiet","--norestart","--noUpdateInstaller")
           Write-Host "Instalador saiu com codigo $($p.ExitCode)"
+          $global:LASTEXITCODE = 0
 
       - name: Pick toolset
         shell: pwsh
@@ -146,6 +150,8 @@ jobs:
           # a pasta boost da raiz NAO e copiada (o Contribs ja fica fora do workspace em D:\)
           robocopy $ws $dst /E /XD "$ws\.git" "$ws\XboxWinClient" "$ws\boost" "$ws\logs" node_modules `
             /XF *.exe *.dll *.lib *.pdb *.obj *.zip /NFL /NDL /NJH /NJS /NP | Out-Null
+          # robocopy usa codigos 0-7 para sucesso
+          if ($LASTEXITCODE -ge 8) { Write-Error "robocopy falhou (codigo $LASTEXITCODE)"; exit 1 }
           $global:LASTEXITCODE = 0
 
           # --- header de compatibilidade (forcado com /FI) ---
@@ -159,6 +165,9 @@ jobs:
           #define XBOX_WIN_PORT 1
           #endif
           #ifdef __cplusplus
+          #ifndef WIN32_LEAN_AND_MEAN
+          #define WIN32_LEAN_AND_MEAN
+          #endif
           #include <windows.h>
           #include <d3d11_1.h>
           #include <dxgi1_2.h>
@@ -192,15 +201,17 @@ jobs:
           Write-Host "Projetos/props alterados: $n"
 
           # --- codigo fonte ---
+          # Latin1 preserva os bytes originais (evita corromper acentos em fontes sem BOM)
+          $lat = [Text.Encoding]::GetEncoding(28591)
           $src = Get-ChildItem $dst -Recurse -Include *.cpp,*.c,*.cc,*.h,*.hpp,*.inl -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -notmatch '\\_shims\\' }
           $m = 0
           foreach ($f in $src) {
-            $t = [IO.File]::ReadAllText($f.FullName); $o = $t
+            $t = [IO.File]::ReadAllText($f.FullName, $lat); $o = $t
             $t = $t -replace '(#\s*include\s*[<"])d3d11_x\.h([>"])',   '${1}d3d11_1.h${2}'
             $t = $t -replace '(#\s*include\s*[<"])d3d12_x\.h([>"])',   '${1}d3d12.h${2}'
             $t = $t -replace '(#\s*include\s*[<"])xaudio2_x\.h([>"])', '${1}xaudio2.h${2}'
-            if ($t -ne $o) { [IO.File]::WriteAllText($f.FullName, $t); $m++ }
+            if ($t -ne $o) { [IO.File]::WriteAllText($f.FullName, $t, $lat); $m++ }
           }
           Write-Host "Fontes alterados: $m"
 
@@ -238,8 +249,9 @@ jobs:
           $inc = @($shim, $env:BOOST_ROOT, $env:CONTRIB_PATH, $ws, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") |
             Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
           $env:INCLUDE = (($inc -join ";") + ";" + $env:INCLUDE)
+          # /permissive removido: e o padrao e o cl do v140 nao reconhece a flag
           $env:CL  = (($inc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /FI`"$shim\xbox_win_shim.h`" /DBOOST_USE_WINDOWS_H /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS /FS"
-          $env:_CL_ = "/WX- /w /Zc:strictStrings- /permissive"
+          $env:_CL_ = "/WX- /w /Zc:strictStrings-"
 
           $sdkVer = "10.0.22621.0"
           $sdkRoot = "C:\Program Files (x86)\Windows Kits\10\Include"
@@ -267,6 +279,8 @@ jobs:
             $new = 0
             foreach ($mh in $missing) {
               if ($mh -match '^boost/') { Write-Host "  (boost nao achado: $mh - verifique o Contribs/boost)"; continue }
+              # nunca criar stub fora da pasta _shims
+              if ($mh -match '(^|/)\.\.(/|$)' -or [IO.Path]::IsPathRooted($mh)) { Write-Host "  (ignorado: $mh)"; continue }
               $stub = Join-Path $shim ($mh -replace '/','\')
               if (Test-Path $stub) { continue }
               New-Item -ItemType Directory -Force -Path (Split-Path $stub) | Out-Null
@@ -281,7 +295,7 @@ jobs:
           }
 
           # relatorio
-          $last = Get-ChildItem "$ws\logs" -Filter "round*.log" | Sort-Object Name -Descending | Select-Object -First 1
+          $last = Get-ChildItem "$ws\logs" -Filter "round*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           $rep = "$ws\logs\port-report.txt"
           "Resultado: " + $(if ($ok) { "COMPILOU" } else { "FALHOU" }) | Set-Content $rep
           if ($last) {
@@ -328,6 +342,10 @@ jobs:
         run: |
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
-          git add -f XboxWinClient
-          git commit -m "XboxWinClient: port experimental Xbox -> Windows" 2>$null
+          # nao commitar saidas de compilacao
+          $ex = "obj","pdb","lib","exe","dll","ilk","idb","ipch","tlog","iobj","ipdb","pch","exp" |
+            ForEach-Object { ":(exclude,glob)**/*.$_" }
+          git add -f -- XboxWinClient @ex
+          git commit -m "XboxWinClient: port experimental Xbox -> Windows"
+          if ($LASTEXITCODE -ne 0) { Write-Host "Nada para commitar."; $global:LASTEXITCODE = 0; exit 0 }
           git push
