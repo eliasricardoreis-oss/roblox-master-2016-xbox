@@ -1,0 +1,310 @@
+name: XboxWinClient (port Xbox -> Windows, experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      contribs_url:
+        description: "URL direta do Contribs.zip (opcional se houver pasta Contribs no repo)"
+        required: false
+        default: ""
+      project_file:
+        description: "Nome do .vcxproj a compilar"
+        required: false
+        default: "XboxClient.vcxproj"
+      toolset:
+        description: "PlatformToolset (auto = v140 se instalar, senao v143)"
+        required: false
+        default: "auto"
+      max_rounds:
+        description: "Rodadas de auto-correcao (stubs de headers)"
+        required: false
+        default: "8"
+      commit_back:
+        description: "Commitar a pasta XboxWinClient no repo"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  port-windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      CONTRIBS_URL: ${{ inputs.contribs_url }}
+      PROJECT_FILE: ${{ inputs.project_file }}
+      TOOLSET_IN: ${{ inputs.toolset }}
+      MAX_ROUNDS: ${{ inputs.max_rounds }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ---------- Contribs / Boost ----------
+      - name: Prepare Contribs (CONTRIB_PATH)
+        shell: pwsh
+        run: |
+          $ws = (Get-Location).Path
+          $contrib = $null
+          $local = Get-ChildItem -Path $ws -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
+          if ($local) { $contrib = $local.FullName }
+
+          if (-not $contrib -and $env:CONTRIBS_URL) {
+            New-Item -ItemType Directory -Force -Path "D:\contribs_ext" | Out-Null
+            curl.exe -L --fail --retry 3 -o "D:\contribs.zip" "$env:CONTRIBS_URL"
+            if ($LASTEXITCODE -ne 0) { Write-Error "Falha ao baixar Contribs.zip"; exit 1 }
+            7z x "D:\contribs.zip" "-oD:\contribs_ext" -y | Select-Object -Last 3
+            Remove-Item -Force "D:\contribs.zip"
+            $contrib = "D:\contribs_ext"
+            $inner = Get-ChildItem $contrib -Directory | Where-Object { $_.Name -ieq "contribs" } | Select-Object -First 1
+            if ($inner) { $contrib = $inner.FullName }
+          }
+
+          if (-not $contrib) {
+            Write-Host "Sem Contribs: usando so Boost 1.56.0"
+            New-Item -ItemType Directory -Force -Path "$ws\third_party\boost" | Out-Null
+            curl.exe -sL --fail "https://archives.boost.io/release/1.56.0/source/boost_1_56_0.tar.bz2" -o "boost.tar.bz2"
+            tar.exe -xjf "boost.tar.bz2" -C "third_party/boost" --strip-components=1 "boost_1_56_0/boost"
+            Remove-Item -Force "boost.tar.bz2"
+            $contrib = "$ws\third_party"
+          }
+
+          $ver = Get-ChildItem -Path $contrib -Filter "version.hpp" -Recurse -Depth 6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\boost\\version\.hpp$' } | Select-Object -First 1
+          if (-not $ver) { Write-Error "boost\version.hpp nao encontrado em $contrib"; exit 1 }
+          $boostRoot = Split-Path (Split-Path $ver.FullName)
+          Write-Host "CONTRIB_PATH=$contrib | BOOST_ROOT=$boostRoot"
+          "CONTRIB_PATH=$contrib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BOOST_ROOT=$boostRoot"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---------- Toolset (v140 se possivel: Boost antigo nao conhece MSVC novo) ----------
+      - name: Install VS 2015 toolset (v140)
+        if: ${{ inputs.toolset == 'auto' }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsw -latest -products * -property installationPath
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            "modify","--installPath","`"$vsPath`"",
+            "--add","Microsoft.VisualStudio.Component.VC.140",
+            "--quiet","--norestart","--noUpdateInstaller")
+          Write-Host "Instalador saiu com codigo $($p.ExitCode)"
+
+      - name: Pick toolset
+        shell: pwsh
+        run: |
+          $ts = $env:TOOLSET_IN
+          if ($ts -eq "auto") {
+            $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vsPath = & $vsw -latest -products * -property installationPath
+            $found = Get-ChildItem -Path "$vsPath\MSBuild\Microsoft\VC" -Recurse -Directory -Filter "v140" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $ts = if ($found) { "v140" } else { "v143" }
+          }
+          Write-Host "Toolset: $ts"
+          "TOOLSET=$ts" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup Visual Studio Developer Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ---------- Criar XboxWinClient e converter ----------
+      - name: Create XboxWinClient and patch Xbox -> Windows
+        shell: pwsh
+        run: |
+          $ws  = (Get-Location).Path
+          $dst = "$ws\XboxWinClient"
+          Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+          robocopy $ws $dst /E /XD .git XboxWinClient contribs_ext third_party logs node_modules `
+            /XF *.exe *.dll *.lib *.pdb *.obj *.zip /NFL /NDL /NJH /NJS /NP | Out-Null
+          $global:LASTEXITCODE = 0
+
+          # --- header de compatibilidade (forcado com /FI) ---
+          $shim = "$dst\_shims"
+          New-Item -ItemType Directory -Force -Path $shim | Out-Null
+          @'
+          #pragma once
+          #ifndef XBOX_WIN_SHIM_H
+          #define XBOX_WIN_SHIM_H
+          #ifndef XBOX_WIN_PORT
+          #define XBOX_WIN_PORT 1
+          #endif
+          #ifdef __cplusplus
+          #include <windows.h>
+          #include <d3d11_1.h>
+          #include <dxgi1_2.h>
+          typedef ID3D11Device1        ID3D11DeviceX;
+          typedef ID3D11DeviceContext1 ID3D11DeviceContextX;
+          #endif
+          #ifndef PIXBeginEvent
+          #define PIXBeginEvent(...)
+          #define PIXEndEvent(...)
+          #define PIXSetMarker(...)
+          #endif
+          #endif
+          '@ | Set-Content "$shim\xbox_win_shim.h" -Encoding ascii
+
+          $ts = $env:TOOLSET
+
+          # --- projetos / props / sln ---
+          $files = Get-ChildItem $dst -Recurse -Include *.vcxproj,*.props,*.targets,*.sln,*.filters -ErrorAction SilentlyContinue
+          $n = 0
+          foreach ($f in $files) {
+            $t = [IO.File]::ReadAllText($f.FullName); $o = $t
+            $t = [regex]::Replace($t, '<Import\b[^>]*Durango[^>]*/>\s*', '')
+            $t = $t -replace '\$\(DurangoXDK\)[^;"<]*;?', ''
+            $t = $t -replace 'Durango', 'x64'
+            $t = $t -replace '<PlatformToolset>[^<]*</PlatformToolset>', "<PlatformToolset>$ts</PlatformToolset>"
+            $t = $t -replace '(d3d11_x|d3d12_x|xg_x|xgi|xg|kernelx|pixEvt)\.lib;?', ''
+            $t = $t -replace '(_XBOX_ONE|WINAPI_FAMILY=WINAPI_FAMILY_TV_TITLE|WINAPI_FAMILY=WINAPI_FAMILY_TV_APP|__WRL_NO_DEFAULT_LIB__);?', ''
+            $t = $t -replace '<PreprocessorDefinitions>', '<PreprocessorDefinitions>XBOX_WIN_PORT;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;'
+            if ($t -ne $o) { [IO.File]::WriteAllText($f.FullName, $t); $n++ }
+          }
+          Write-Host "Projetos/props alterados: $n"
+
+          # --- codigo fonte ---
+          $src = Get-ChildItem $dst -Recurse -Include *.cpp,*.c,*.cc,*.h,*.hpp,*.inl -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\_shims\\' }
+          $m = 0
+          foreach ($f in $src) {
+            $t = [IO.File]::ReadAllText($f.FullName); $o = $t
+            $t = $t -replace '(#\s*include\s*[<"])d3d11_x\.h([>"])',  '${1}d3d11_1.h${2}'
+            $t = $t -replace '(#\s*include\s*[<"])d3d12_x\.h([>"])',  '${1}d3d12.h${2}'
+            $t = $t -replace '(#\s*include\s*[<"])xaudio2_x\.h([>"])', '${1}xaudio2.h${2}'
+            if ($t -ne $o) { [IO.File]::WriteAllText($f.FullName, $t); $m++ }
+          }
+          Write-Host "Fontes alterados: $m"
+
+      # ---------- Compilar com auto-correcao ----------
+      - name: Build XboxWinClient (auto-fix loop)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $ws  = (Get-Location).Path
+          $dst = "$ws\XboxWinClient"
+          $shim = "$dst\_shims"
+          New-Item -ItemType Directory -Force -Path "$ws\logs" | Out-Null
+
+          $projFile = Get-ChildItem $dst -Recurse -Filter $env:PROJECT_FILE | Select-Object -First 1
+          if (-not $projFile) {
+            Write-Host "Projeto '$env:PROJECT_FILE' nao encontrado. Disponiveis:"
+            Get-ChildItem $dst -Recurse -Filter *.vcxproj | Select-Object -First 40 -ExpandProperty FullName
+            exit 1
+          }
+          Write-Host "Projeto: $($projFile.FullName)"
+
+          # mapeamento de headers conhecidos
+          $map = @{
+            "d3d11_x.h"   = "#include <d3d11_1.h>"
+            "d3d12_x.h"   = "#include <d3d12.h>"
+            "xaudio2_x.h" = "#include <xaudio2.h>"
+            "xdk.h"       = ""
+            "xg.h"        = ""
+            "pix.h"       = ""
+          }
+
+          $root = $dst
+          $nested = Get-ChildItem $dst -Directory | Where-Object { Test-Path (Join-Path $_.FullName "App") } | Select-Object -First 1
+          if (-not (Test-Path (Join-Path $dst "App")) -and $nested) { $root = $nested.FullName }
+
+          $inc = @($shim, $env:BOOST_ROOT, $env:CONTRIB_PATH, $root, "$root\App\include", "$root\ClientShared", "$root\Log\include", "$root\Rendering\G3D\include", "$root\Network\include") |
+            Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $env:INCLUDE = (($inc -join ";") + ";" + $env:INCLUDE)
+          $env:CL  = (($inc | ForEach-Object { "/I`"$_`"" }) -join " ") + " /FI`"$shim\xbox_win_shim.h`" /DBOOST_USE_WINDOWS_H /D_WINSOCK_DEPRECATED_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS /FS"
+          $env:_CL_ = "/WX- /w /Zc:strictStrings- /permissive"
+
+          $sdkVer = "10.0.22621.0"
+          $sdkRoot = "C:\Program Files (x86)\Windows Kits\10\Include"
+          if (Test-Path $sdkRoot) {
+            $l = Get-ChildItem $sdkRoot -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+            if ($l) { $sdkVer = $l.Name }
+          }
+
+          $ok = $false
+          $max = [int]$env:MAX_ROUNDS
+          for ($round = 1; $round -le $max; $round++) {
+            $log = "$ws\logs\round$round.log"
+            Write-Host "===== Rodada $round/$max ====="
+            & msbuild.exe $projFile.FullName `
+              "/p:Configuration=Release" "/p:Platform=x64" `
+              "/p:PlatformToolset=$env:TOOLSET" "/p:WindowsTargetPlatformVersion=$sdkVer" `
+              "/p:CONTRIB_PATH=$env:CONTRIB_PATH" `
+              "/p:PostBuildEventUseInBuild=false" "/p:PreBuildEventUseInBuild=false" `
+              "/p:TreatWarningAsError=false" `
+              /maxCpuCount:1 /nologo /v:minimal "/flp:LogFile=$log;Verbosity=minimal" | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host "BUILD OK na rodada $round"; $ok = $true; break }
+
+            $missing = Select-String -Path $log -Pattern "C1083: Cannot open include file: '([^']+)'" -AllMatches |
+              ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value -replace '\\','/' } | Sort-Object -Unique
+            $new = 0
+            foreach ($mh in $missing) {
+              if ($mh -match '^boost/') { continue }
+              $stub = Join-Path $shim ($mh -replace '/','\')
+              if (Test-Path $stub) { continue }
+              New-Item -ItemType Directory -Force -Path (Split-Path $stub) | Out-Null
+              $leaf = Split-Path $mh -Leaf
+              $body = "#pragma once"
+              if ($map.ContainsKey($leaf)) { $body += "`n" + $map[$leaf] }
+              Set-Content -Path $stub -Value $body -Encoding ascii
+              Write-Host "  stub criado: $mh"
+              $new++
+            }
+            if ($new -eq 0) { Write-Host "Nenhum header novo para criar; parando o loop."; break }
+          }
+
+          # relatorio
+          $last = Get-ChildItem "$ws\logs" -Filter "round*.log" | Sort-Object Name -Descending | Select-Object -First 1
+          $rep = "$ws\logs\port-report.txt"
+          "Resultado: " + $(if ($ok) { "COMPILOU" } else { "FALHOU" }) | Set-Content $rep
+          if ($last) {
+            "`nTop erros ($($last.Name)):" | Add-Content $rep
+            Select-String -Path $last.FullName -Pattern 'error (C|LNK|MSB)\d+' |
+              ForEach-Object { if ($_.Line -match '(error (?:C|LNK|MSB)\d+: [^\[]{0,160})') { $Matches[1] } } |
+              Group-Object | Sort-Object Count -Descending | Select-Object -First 50 |
+              ForEach-Object { "{0,5}  {1}" -f $_.Count, $_.Name } | Add-Content $rep
+            Write-Host "`n===== RELATORIO ====="; Get-Content $rep
+          }
+          if (-not $ok) { exit 1 }
+
+      # ---------- Artefatos ----------
+      - name: Upload XboxWinClient (codigo convertido)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XboxWinClient-src
+          path: XboxWinClient/**
+          if-no-files-found: ignore
+
+      - name: Upload logs e relatorio
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xboxwin-logs
+          path: logs/**
+          if-no-files-found: ignore
+
+      - name: Upload binarios
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: XboxWinClient-bin
+          path: |
+            XboxWinClient/**/*.exe
+            XboxWinClient/**/*.dll
+          if-no-files-found: warn
+
+      # ---------- Opcional: commitar a pasta no repo ----------
+      - name: Commit XboxWinClient
+        if: ${{ always() && inputs.commit_back }}
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
+          git add -f XboxWinClient
+          git commit -m "XboxWinClient: port experimental Xbox -> Windows" 2>$null
+          git push
