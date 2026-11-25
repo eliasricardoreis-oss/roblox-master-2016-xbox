@@ -118,6 +118,11 @@ static void checkDbg()
 #ifdef __RBX_NOT_RELEASE
 	return;
 #else
+	// RBX_MINGW_DBG
+#ifndef _MSC_VER
+	isDebuggedValue = IsDebuggerPresent() ? true : isDebuggedValue;
+	return; // RBX_MINGW_DBG2
+#else
 	DWORD dw = 0;
 	__asm
 	{
@@ -140,6 +145,7 @@ static void checkDbg()
 	{
 		isDebuggedValue = true;
 	}
+#endif
 #endif
 }
 

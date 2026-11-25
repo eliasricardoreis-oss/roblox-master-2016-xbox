@@ -74,7 +74,7 @@ namespace Graphics
         const CBufferList& getCBuffers() const { return cBuffers; }
 
     protected:
-        typedef CBufferList CBufferList;
+        // typedef CBufferList CBufferList; (redeclaracao invalida no GCC)
 
         std::vector<shared_ptr<CBufferD3D11>> cBuffers;
         int uniformsBufferId;

@@ -39,6 +39,9 @@
     <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="ContribPath">
+    <CONTRIB_PATH Condition="'$(CONTRIB_PATH)'==''">$(MSBuildThisFileDirectory)..\contrib</CONTRIB_PATH>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -113,7 +116,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -133,7 +136,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -153,7 +156,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -173,7 +176,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -193,7 +196,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -213,7 +216,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\AppBridge;..\Base\include;..\Network\raknet\Source;..\fmod\UWP\include;..\Network\include;..\App\include;..\App.BulletPhysics;..\ClientBase;..\ClientShared;..\Rendering\AppDraw\include;..\Rendering\GfxRender\include;..\Rendering\GfxRender;..\Rendering\GfxBase\include;..\Rendering\GfxCore\include;..\Rendering\RbxG3D\include;..\Rendering\g3d\include;$(CONTRIB_PATH)\SDL2.0.4\Include;$(CONTRIB_PATH)\boost_1_56_0\include;$(CONTRIB_PATH)\cpp-netlib-0.11.0-final;$(CONTRIB_PATH)\windows\x86\curl\curl-7.43.0\include;..\Log\include;..\Log\include;..\Log;..\Network;$(GeneratedFilesDir)\Screens;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <DisableSpecificWarnings>4453;28204</DisableSpecificWarnings>
       <PreprocessorDefinitions>ENABLE_XBOX_BUILD;RBX_PLATFORM_UWP;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;NTDDI_VERSION=0x0A000006;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>

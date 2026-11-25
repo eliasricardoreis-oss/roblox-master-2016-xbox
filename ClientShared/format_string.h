@@ -1,4 +1,8 @@
 #pragma once
+#if defined(_WIN32) && !defined(_MSC_VER) // RBX_OBJBASE (so mingw)
+#include <windows.h>
+#include <objbase.h>
+#endif
 
 #include <string>
 #include <fstream>

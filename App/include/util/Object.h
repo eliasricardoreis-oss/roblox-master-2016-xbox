@@ -333,10 +333,10 @@ namespace RBX
 	// gcc error: expected nested-name-specifier before 'const'
 	// This is not a proper way to fix, but I do not have a choice right now. The variable is in a private section of a class so should be safe.
 	template <class Class, class BaseClass, const char* const& sClassName, class FactoryClass>
-#ifdef _WIN32
+#ifdef _MSC_VER // RBX_GCC_CREATOR
 	typename const FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::Creator FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::creatorPrivate;
 #else
-	typename FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::Creator FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::creatorPrivate;
+	/*RBX_CREATOR2*/const typename FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::Creator FactoryProduct<Class, BaseClass, sClassName, FactoryClass>::creatorPrivate;
 #endif
 
 	template <class Class, class BaseClass, const char* const& sClassName, class FactoryClass>

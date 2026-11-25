@@ -1,3 +1,6 @@
+#ifndef BI_RGB // RBX_BIRGB
+#define BI_RGB 0
+#endif
 /**
   @file GImage_bmp.cpp
   @author Morgan McGuire, http://graphics.cs.williams.edu

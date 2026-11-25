@@ -1,4 +1,8 @@
 #pragma once
+// RBX_INC3
+#include <boost/unordered_set.hpp>
+#include "GfxBase/RenderCaps.h"
+namespace RBX { class DataModel; }
 
 #include "util/Profiling.h"
 

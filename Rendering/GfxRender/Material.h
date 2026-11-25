@@ -1,4 +1,8 @@
 #pragma once
+// RBX_INC4
+#include "util/G3DCore.h"
+// RBX_INC3
+#include "G3D/Vector4.h"
 
 #include "GfxCore/States.h"
 #include "g3d/Vector4.h"

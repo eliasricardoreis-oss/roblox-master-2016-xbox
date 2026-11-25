@@ -266,3 +266,13 @@ namespace boost
 		}
 	}
 }
+
+// RBX_ADL: GCC so acha estas funcoes via ADL se estiverem no namespace rbx
+#ifndef _MSC_VER
+namespace rbx {
+ using boost::intrusive_ptr_add_ref;
+ using boost::intrusive_ptr_release;
+ using boost::intrusive_ptr_add_weak_ref;
+ using boost::intrusive_ptr_weak_release;
+}
+#endif

@@ -75,6 +75,7 @@ namespace RBX {
 			info.dwThreadID = dwThreadID;
 			info.dwFlags = 0;
 			
+#ifdef _MSC_VER // RBX_MINGW_SEH
 			__try
 			{
 				// Comment this out to allow AQ time to work per Erik - 5/22/07
@@ -86,6 +87,7 @@ namespace RBX {
 			__except(EXCEPTION_CONTINUE_EXECUTION)
 			{
 			}
+#endif
 		}
 	}
 #pragma warning(pop)

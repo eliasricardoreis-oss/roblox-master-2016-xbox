@@ -6,7 +6,7 @@
 #define RBX_SECURE_DOUBLE
 #endif
 
-#ifdef _WIN32
+#ifdef _MSC_VER // RBX_ALIGN_GCC
 #define RBX_ALIGN(s) _declspec(align(s)) 
 #else
 #define RBX_ALIGN(s) __attribute__((__aligned__(s))) 

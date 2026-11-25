@@ -151,7 +151,7 @@ protected:
     template <class tHash, class tState>
     void checkDuplicates(const tHash& hash, tState* state)
     {
-        for (tHash::const_iterator it = hash.begin(); it != hash.end(); ++it)
+        for (typename tHash::const_iterator it = hash.begin(); it != hash.end(); ++it)
 		{
             RBXASSERT(state != it->second);
 		}

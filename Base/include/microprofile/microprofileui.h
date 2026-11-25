@@ -174,7 +174,9 @@ MICROPROFILEUI_API void MicroProfileCustomGroupAddTimer(const char* pCustomName,
 
 #ifdef MICROPROFILEUI_IMPL
 #ifdef _WIN32
+#ifdef _MSC_VER
 #define snprintf _snprintf
+#endif
 #endif
 #include <cstdlib>
 #include <cstdarg>

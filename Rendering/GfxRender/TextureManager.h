@@ -1,4 +1,6 @@
 #pragma once
+// RBX_INC3
+#include <boost/unordered_set.hpp>
 
 #include "TextureRef.h"
 #include "util/ContentId.h"

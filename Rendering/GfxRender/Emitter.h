@@ -1,4 +1,9 @@
 #pragma once
+// RBX_INC4
+#include "util/G3DCore.h"
+// RBX_INC3
+#include "G3D/Vector2.h"
+#include "G3D/Vector4.h"
 
 #include "g3d/Random.h"
 #include "g3d/CoordinateFrame.h"

@@ -1,3 +1,6 @@
+#if defined(_WIN32) && !defined(_MSC_VER) // RBX_WINH (so mingw)
+#include <windows.h>
+#endif
 /** 
   @file System.cpp
  
